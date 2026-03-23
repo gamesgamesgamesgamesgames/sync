@@ -1,0 +1,17 @@
+[Unit]
+Description=Steam enrichment for IGDB game records
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/igdb-scrape
+ExecStart=/root/igdb-scrape/node_modules/.bin/tsx src/steam-enrich.ts
+EnvironmentFile=/root/igdb-scrape/.env
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=120
+StandardOutput=append:/var/log/igdb-scrape/steam-enrich.log
+StandardError=append:/var/log/igdb-scrape/steam-enrich.log
+
+[Install]
+WantedBy=multi-user.target

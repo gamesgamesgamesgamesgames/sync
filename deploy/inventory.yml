@@ -1,0 +1,5 @@
+all:
+  hosts:
+    enrichment:
+      ansible_host: 37.27.85.22
+      ansible_ssh_private_key_file: "{{ lookup('env', 'ANSIBLE_PRIVATE_KEY_FILE') | default('~/.ssh/id_ed25519', true) }}"

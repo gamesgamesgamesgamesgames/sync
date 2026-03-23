@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+state.json
+state.sqlite
+state.sqlite-shm
+state.sqlite-wal
+.DS_Store
+docs/plans/
+deploy.sh

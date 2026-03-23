@@ -1,0 +1,154 @@
+---
+- name: Deploy igdb-scrape enrichment scripts
+  hosts: enrichment
+  gather_facts: false
+
+  tasks:
+    # --- Node.js ---
+    - name: Check if Node.js 22 is installed
+      command: node --version
+      register: node_version
+      changed_when: false
+      failed_when: false
+
+    - name: Install NodeSource GPG key
+      shell: curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg
+      args:
+        creates: /usr/share/keyrings/nodesource.gpg
+      when: node_version.rc != 0 or 'v22' not in node_version.stdout
+
+    - name: Add NodeSource 22.x repo
+      copy:
+        content: "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main\n"
+        dest: /etc/apt/sources.list.d/nodesource.list
+      when: node_version.rc != 0 or 'v22' not in node_version.stdout
+
+    - name: Install Node.js
+      apt:
+        name: nodejs
+        state: present
+        update_cache: true
+      when: node_version.rc != 0 or 'v22' not in node_version.stdout
+
+    # --- Directories ---
+    - name: Create working directory
+      file:
+        path: /root/igdb-scrape
+        state: directory
+        mode: "0755"
+
+    - name: Create log directory
+      file:
+        path: /var/log/igdb-scrape
+        state: directory
+        mode: "0755"
+
+    # --- Code deployment ---
+    - name: Sync code to server
+      synchronize:
+        src: "{{ playbook_dir }}/../"
+        dest: /root/igdb-scrape/
+        rsync_opts:
+          - "--exclude=.env"
+          - "--exclude=state.sqlite"
+          - "--exclude=state.sqlite-*"
+          - "--exclude=node_modules"
+          - "--exclude=.git"
+          - "--exclude=deploy"
+      notify: restart steam-enrich
+
+    - name: Install npm dependencies
+      command: npm install --omit=dev
+      args:
+        chdir: /root/igdb-scrape
+      register: npm_result
+      changed_when: "'added' in npm_result.stdout or 'updated' in npm_result.stdout"
+
+    # --- Configuration ---
+    - name: Template .env file
+      template:
+        src: templates/env.j2
+        dest: /root/igdb-scrape/.env
+        mode: "0600"
+      notify: restart steam-enrich
+
+    # --- Systemd units ---
+    - name: Deploy steam-enrich service
+      template:
+        src: templates/steam-enrich.service.j2
+        dest: /etc/systemd/system/steam-enrich.service
+      notify:
+        - reload systemd
+        - restart steam-enrich
+
+    - name: Deploy igdb-sync service
+      template:
+        src: templates/igdb-sync.service.j2
+        dest: /etc/systemd/system/igdb-sync.service
+      notify: reload systemd
+
+    - name: Deploy igdb-sync timer
+      template:
+        src: templates/igdb-sync.timer.j2
+        dest: /etc/systemd/system/igdb-sync.timer
+      notify: reload systemd
+
+    - name: Deploy steamspy-enrich service
+      template:
+        src: templates/steamspy-enrich.service.j2
+        dest: /etc/systemd/system/steamspy-enrich.service
+      notify: reload systemd
+
+    - name: Deploy steamspy-enrich timer
+      template:
+        src: templates/steamspy-enrich.timer.j2
+        dest: /etc/systemd/system/steamspy-enrich.timer
+      notify: reload systemd
+
+    # --- Log rotation ---
+    - name: Deploy logrotate config
+      template:
+        src: templates/logrotate-igdb-scrape.j2
+        dest: /etc/logrotate.d/igdb-scrape
+        mode: "0644"
+
+    # --- Migration: remove old cron job ---
+    - name: Remove old igdb-sync cron entry
+      cron:
+        name: "igdb-sync"
+        job: "cd /root/igdb-scrape && npx tsx src/sync.ts >> sync.log 2>&1"
+        state: absent
+
+    # --- Enable and start services ---
+    - name: Flush handlers before starting services
+      meta: flush_handlers
+
+    - name: Enable and start igdb-sync timer
+      systemd:
+        name: igdb-sync.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Enable and start steamspy-enrich timer
+      systemd:
+        name: steamspy-enrich.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Enable and start steam-enrich service
+      systemd:
+        name: steam-enrich.service
+        enabled: true
+        state: started
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: true
+
+    - name: restart steam-enrich
+      systemd:
+        name: steam-enrich.service
+        state: restarted

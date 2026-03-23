@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly IGDB sync
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/igdb-scrape
+ExecStart=/root/igdb-scrape/node_modules/.bin/tsx src/sync.ts
+EnvironmentFile=/root/igdb-scrape/.env
+StandardOutput=append:/var/log/igdb-scrape/igdb-sync.log
+StandardError=append:/var/log/igdb-scrape/igdb-sync.log

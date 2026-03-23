@@ -1,0 +1,35 @@
+{
+	"name": "igdb-scrape",
+	"version": "1.0.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"start": "tsx src/index.ts",
+		"sync": "tsx src/sync.ts",
+		"backfill-app-type": "tsx src/backfill-application-type.ts",
+		"backfill-steam-map": "tsx src/backfill-steam-map.ts",
+		"backfill-blobs-1080p": "tsx src/backfill-blobs-1080p.ts",
+		"backfill-collections": "tsx src/backfill-collections.ts",
+		"backfill-grac-nineteen": "tsx src/backfill-grac-nineteen.ts",
+		"backfill-twitch-ids": "tsx src/backfill-twitch-ids.ts",
+		"transform": "tsx src/run-transformers.ts",
+		"steam-enrich": "tsx src/steam-enrich.ts",
+		"steamspy-enrich": "tsx src/steamspy-enrich.ts",
+		"test": "vitest run",
+		"test:watch": "vitest"
+	},
+	"dependencies": {
+		"@atproto/api": "^0.15.0",
+		"@aws-sdk/client-s3": "^3.1004.0",
+		"better-sqlite3": "^12.6.2",
+		"dotenv": "^16.4.0",
+		"postgres": "^3.4.8",
+		"tsx": "^4.0.0"
+	},
+	"devDependencies": {
+		"@types/better-sqlite3": "^7.6.13",
+		"@types/node": "^22.0.0",
+		"typescript": "^5.7.0",
+		"vitest": "^4.0.18"
+	}
+}
