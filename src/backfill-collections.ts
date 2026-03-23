@@ -23,7 +23,7 @@ import { StateManager } from './state.js'
 import type { IGDBCollection, IGDBFranchise } from './igdb/types.js'
 
 const COLLECTION_NSID = 'games.gamesgamesgamesgames.collection'
-const HAPPYVIEW_URL = '***REDACTED***'
+const HAPPYVIEW_URL = process.env.HAPPYVIEW_DATABASE_URL!
 const BATCH_SIZE = 25
 
 interface CollectionInfo {
