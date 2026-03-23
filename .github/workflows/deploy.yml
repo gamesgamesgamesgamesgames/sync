@@ -45,7 +45,8 @@ jobs:
             -e "atproto_service=${{ secrets.ATPROTO_SERVICE }}" \
             -e "atproto_identifier=${{ secrets.ATPROTO_IDENTIFIER }}" \
             -e "atproto_password=${{ secrets.ATPROTO_PASSWORD }}" \
-            -e "happyview_url=${{ secrets.HAPPYVIEW_URL }}"
+            -e "happyview_url=${{ secrets.HAPPYVIEW_URL }}" \
+            -e "happyview_api_key=${{ secrets.HAPPYVIEW_API_KEY }}"
 
       - name: Cleanup SSH key
         if: always()

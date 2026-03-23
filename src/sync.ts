@@ -179,7 +179,7 @@ async function main() {
 		concurrency: 20,
 		getSlug: (item) => item.slug,
 		happyviewUrl: HAPPYVIEW_URL,
-		getAccessJwt: () => atproto.getAccessJwt(),
+		happyviewApiKey: process.env.HAPPYVIEW_API_KEY,
 		startOffset: state.getLastSyncAt('game') ? 0 : state.getEntityCount('game'),
 		mapRecord: async (item) => {
 			// For existing games, fetch the current record for media comparison

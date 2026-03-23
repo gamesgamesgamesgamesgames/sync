@@ -31,8 +31,8 @@ export interface SyncEntityConfig<T extends { id: number }> {
 	getSlug?: (item: T) => string | undefined
 	/** HappyView base URL for XRPC calls (e.g. slug writes via putGame). Required when getSlug is set. */
 	happyviewUrl?: string
-	/** Function returning the current access JWT for authenticating XRPC calls. */
-	getAccessJwt?: () => string | undefined
+	/** HappyView API key for authenticating XRPC calls. */
+	happyviewApiKey?: string
 }
 
 export interface SyncResult {
@@ -63,12 +63,12 @@ function sortKeys(obj: unknown): unknown {
 	return sorted
 }
 
-async function putSlugViaXrpc(happyviewUrl: string, accessJwt: string, uri: string, slug: string): Promise<void> {
+async function putSlugViaXrpc(happyviewUrl: string, apiKey: string, uri: string, slug: string): Promise<void> {
 	const response = await fetch(`${happyviewUrl}/xrpc/games.gamesgamesgamesgames.putGame`, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',
-			'Authorization': `Bearer ${accessJwt}`,
+			'Authorization': `Bearer ${apiKey}`,
 		},
 		body: JSON.stringify({ uri, slug }),
 	})
@@ -195,14 +195,11 @@ export async function syncEntityType<T extends { id: number }>(
 						if (steamId) {
 							state.setSteamMapping(entry.key, steamId, res.uri)
 						}
-						if (entry.slug && config.happyviewUrl && config.getAccessJwt) {
-							const jwt = config.getAccessJwt()
-							if (jwt) {
-								try {
-									await putSlugViaXrpc(config.happyviewUrl, jwt, res.uri, entry.slug)
-								} catch (err) {
-									console.error(`  [!] Slug insert failed for ${entry.name}:`, (err as Error).message)
-								}
+						if (entry.slug && config.happyviewUrl && config.happyviewApiKey) {
+							try {
+								await putSlugViaXrpc(config.happyviewUrl, config.happyviewApiKey, res.uri, entry.slug)
+							} catch (err) {
+								console.error(`  [!] Slug insert failed for ${entry.name}:`, (err as Error).message)
 							}
 						}
 					}
@@ -220,14 +217,11 @@ export async function syncEntityType<T extends { id: number }>(
 						if (steamId) {
 							state.setSteamMapping(entry.key, steamId, uri)
 						}
-						if (entry.slug && config.happyviewUrl && config.getAccessJwt) {
-							const jwt = config.getAccessJwt()
-							if (jwt) {
-								try {
-									await putSlugViaXrpc(config.happyviewUrl, jwt, uri, entry.slug)
-								} catch (err) {
-									console.error(`  [!] Slug insert failed for ${entry.name}:`, (err as Error).message)
-								}
+						if (entry.slug && config.happyviewUrl && config.happyviewApiKey) {
+							try {
+								await putSlugViaXrpc(config.happyviewUrl, config.happyviewApiKey, uri, entry.slug)
+							} catch (err) {
+								console.error(`  [!] Slug insert failed for ${entry.name}:`, (err as Error).message)
 							}
 						}
 					} catch (putErr) {
@@ -257,18 +251,15 @@ export async function syncEntityType<T extends { id: number }>(
 				}
 			}
 
-			if (config.getSlug && config.happyviewUrl && config.getAccessJwt) {
-				const jwt = config.getAccessJwt()
-				if (jwt) {
-					for (const entry of createBatch) {
-						if (entry.slug) {
-							const entityUri = state.getEntity(entityType, entry.id)
-							if (entityUri) {
-								try {
-									await putSlugViaXrpc(config.happyviewUrl, jwt, entityUri, entry.slug)
-								} catch (err) {
-									console.error(`  [!] Slug insert failed for ${entry.name}:`, (err as Error).message)
-								}
+			if (config.getSlug && config.happyviewUrl && config.happyviewApiKey) {
+				for (const entry of createBatch) {
+					if (entry.slug) {
+						const entityUri = state.getEntity(entityType, entry.id)
+						if (entityUri) {
+							try {
+								await putSlugViaXrpc(config.happyviewUrl, config.happyviewApiKey, entityUri, entry.slug)
+							} catch (err) {
+								console.error(`  [!] Slug insert failed for ${entry.name}:`, (err as Error).message)
 							}
 						}
 					}
