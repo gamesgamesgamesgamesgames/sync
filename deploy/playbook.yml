@@ -114,10 +114,11 @@
 
     # --- Migration: remove old cron job ---
     - name: Remove old igdb-sync cron entry
-      cron:
-        name: "igdb-sync"
-        job: "cd /root/igdb-scrape && npx tsx src/sync.ts >> sync.log 2>&1"
+      lineinfile:
+        path: /var/spool/cron/crontabs/root
+        regexp: "igdb-scrape.*sync\\.ts"
         state: absent
+      failed_when: false
 
     # --- Enable and start services ---
     - name: Flush handlers before starting services
