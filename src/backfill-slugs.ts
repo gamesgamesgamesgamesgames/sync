@@ -30,15 +30,20 @@ async function main() {
 
 	console.log('Finding game records without slugs...')
 
-	const games = await sql`
-		SELECT r.uri, r.record->>'name' AS name
+	const allGames = await sql`
+		SELECT r.uri, r.record
 		FROM records r
 		LEFT JOIN slugs s ON s.uri = r.uri
 		WHERE r.collection = 'games.gamesgamesgamesgames.game'
 		  AND s.uri IS NULL
-		  AND r.record->>'name' IS NOT NULL
 		ORDER BY r.uri
 	`
+	const games = allGames
+		.map((r) => {
+			const rec = typeof r.record === 'string' ? JSON.parse(r.record) : r.record
+			return { uri: r.uri, name: rec?.name as string | undefined }
+		})
+		.filter((r) => r.name)
 
 	console.log(`Found ${games.length} games without slugs.`)
 

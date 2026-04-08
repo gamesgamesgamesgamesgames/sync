@@ -101,21 +101,19 @@ async function main() {
 
 	// Query all games with IGDB ID but no Twitch ID
 	const sql = pg(dbUrl)
-	console.log('[backfill-twitch] Querying games with IGDB IDs but no Twitch IDs...')
-	const rows = await sql`
-		SELECT
-			uri,
-			did,
-			rkey,
-			record->'externalIds'->>'igdb' AS igdb_id,
-			record AS record
+	console.log('[backfill-twitch] Querying games from HappyView...')
+	const allRows = await sql`
+		SELECT uri, did, rkey, record
 		FROM records
 		WHERE collection = 'games.gamesgamesgamesgames.game'
-		  AND record->'externalIds'->>'igdb' IS NOT NULL
-		  AND (record->'externalIds'->>'twitch' IS NULL
-		       OR record->'externalIds'->>'twitch' = '')
 	`
-	console.log(`[backfill-twitch] Found ${rows.length} games to resolve`)
+	const rows = allRows
+		.map((r) => {
+			const rec = typeof r.record === 'string' ? JSON.parse(r.record) : r.record
+			return { ...r, record: rec, igdb_id: rec?.externalIds?.igdb as string | undefined }
+		})
+		.filter((r) => r.igdb_id && !r.record?.externalIds?.twitch)
+	console.log(`[backfill-twitch] Found ${rows.length} games to resolve (of ${allRows.length} total)`)
 
 	if (rows.length === 0) {
 		console.log('[backfill-twitch] Nothing to do.')
@@ -125,7 +123,7 @@ async function main() {
 
 	// Batch resolve IGDB IDs → Twitch IDs
 	const igdbToTwitch = new Map<string, string>()
-	const allIgdbIds = rows.map((r) => r.igdb_id as string)
+	const allIgdbIds = rows.map((r) => r.igdb_id!)
 
 	for (let i = 0; i < allIgdbIds.length; i += HELIX_BATCH_SIZE) {
 		const batch = allIgdbIds.slice(i, i + HELIX_BATCH_SIZE)

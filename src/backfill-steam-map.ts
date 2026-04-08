@@ -22,20 +22,19 @@ async function main() {
 
 	console.log('[backfill-steam-map] Querying game records with Steam IDs from HappyView...')
 	const rows = await sql`
-		SELECT
-			uri,
-			record->'externalIds'->>'igdb' AS igdb_id,
-			record->'externalIds'->>'steam' AS steam_id
+		SELECT uri, record
 		FROM records
 		WHERE collection = 'games.gamesgamesgamesgames.game'
-		  AND record->'externalIds'->>'igdb' IS NOT NULL
-		  AND record->'externalIds'->>'steam' IS NOT NULL
 	`
-	console.log(`[backfill-steam-map] Found ${rows.length} games with Steam IDs`)
+	console.log(`[backfill-steam-map] Found ${rows.length} game records, filtering for Steam IDs...`)
 
 	let count = 0
 	for (const row of rows) {
-		state.setSteamMapping(row.igdb_id, row.steam_id, row.uri)
+		const rec = typeof row.record === 'string' ? JSON.parse(row.record) : row.record
+		const igdbId = rec?.externalIds?.igdb
+		const steamId = rec?.externalIds?.steam
+		if (!igdbId || !steamId) continue
+		state.setSteamMapping(igdbId, steamId, row.uri)
 		count++
 		if (count % 10000 === 0) {
 			console.log(`[backfill-steam-map] Progress: ${count}/${rows.length}`)
