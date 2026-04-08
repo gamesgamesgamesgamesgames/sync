@@ -7,7 +7,6 @@ on:
       - 'src/**'
       - 'package.json'
       - 'package-lock.json'
-      - 'deploy/**'
       - '.github/workflows/deploy.yml'
   workflow_dispatch:
 
@@ -17,39 +16,12 @@ concurrency:
 
 jobs:
   deploy:
-    name: Deploy to Hetzner
+    name: Trigger deploy via cartridge-infra
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Ansible
-        run: pip install ansible
-
-      - name: Setup SSH key
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      - name: Dispatch deploy-sync
         run: |
-          mkdir -p ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H 37.27.85.22 >> ~/.ssh/known_hosts
-
-      - name: Run Ansible playbook
-        working-directory: deploy
+          gh api repos/gamesgamesgamesgamesgames/cartridge-infra/dispatches \
+            -f event_type=deploy-sync
         env:
-          ANSIBLE_HOST_KEY_CHECKING: "false"
-          ANSIBLE_PRIVATE_KEY_FILE: ~/.ssh/deploy_key
-        run: |
-          ansible-playbook playbook.yml \
-            -e "twitch_client_id=${{ secrets.TWITCH_CLIENT_ID }}" \
-            -e "twitch_client_secret=${{ secrets.TWITCH_CLIENT_SECRET }}" \
-            -e "atproto_service=${{ secrets.ATPROTO_SERVICE }}" \
-            -e "atproto_identifier=${{ secrets.ATPROTO_IDENTIFIER }}" \
-            -e "atproto_password=${{ secrets.ATPROTO_PASSWORD }}" \
-            -e "happyview_url=${{ secrets.HAPPYVIEW_URL }}" \
-            -e "happyview_api_key=${{ secrets.HAPPYVIEW_API_KEY }}"
-
-      - name: Cleanup SSH key
-        if: always()
-        run: rm -f ~/.ssh/deploy_key
+          GH_TOKEN: ${{ secrets.DISPATCH_GH_TOKEN }}
