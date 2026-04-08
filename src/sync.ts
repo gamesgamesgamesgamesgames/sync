@@ -24,9 +24,9 @@ import {
 	mapCollection,
 	mapFranchise,
 	mapGame,
-	// mapOrgCredit,
 } from './atproto/mapping.js'
 import { syncEntityType, type SyncEntityConfig } from './pipeline/sync-entities.js'
+import { syncNewCompanies } from './pipeline/sync-companies.js'
 import { slugify } from './helpers.js'
 import type {
 	// IGDBPlatformFamily,
@@ -35,7 +35,6 @@ import type {
 	IGDBCollection,
 	IGDBFranchise,
 	IGDBGame,
-	// IGDBInvolvedCompany,
 } from './igdb/types.js'
 
 async function main() {
@@ -222,29 +221,9 @@ async function main() {
 	}
 	await syncEntityType(franchiseConfig, igdb, atproto, state)
 
-	// // 7. Credits (involved companies)
-	// const creditConfig: SyncEntityConfig<IGDBInvolvedCompany> = {
-	// 	entityType: 'orgCredit',
-	// 	igdbEndpoint: 'involved_companies',
-	// 	igdbFields: [
-	// 		'fields company.id, company.name, company.slug,',
-	// 		'game, developer, publisher, porting, supporting, updated_at;',
-	// 	].join(' '),
-	// 	collection: 'games.gamesgamesgamesgames.org.credit',
-	// 	mapRecord: async (item) => {
-	// 		const gameId = typeof item.game === 'number' ? item.game : undefined
-	// 		if (!gameId) throw new Error('No game ID on involved company')
-
-	// 		const gameUri = state.getEntity('game', gameId)
-	// 		if (!gameUri) throw new Error(`Game ${gameId} not found in state`)
-
-	// 		const record = mapOrgCredit(item, gameUri, 'bafyreig6')
-	// 		if (!record) throw new Error('mapOrgCredit returned null')
-
-	// 		return record
-	// 	},
-	// }
-	// await syncEntityType(creditConfig, igdb, atproto, state)
+	// 7. Sync new companies — create org profiles for any companies
+	//    encountered in game updates that don't have profiles yet.
+	await syncNewCompanies(igdb, atproto, state)
 
 	// Done
 	console.log()

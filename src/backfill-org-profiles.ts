@@ -25,7 +25,6 @@ import { StateManager } from './state.js'
 import { IGDB_WEBSITE_CATEGORY } from './igdb/types.js'
 import type {
 	IGDBCompany,
-	IGDBInvolvedCompany,
 	IGDBWebsite,
 } from './igdb/types.js'
 import { errorLabel } from './helpers.js'
@@ -271,7 +270,7 @@ async function main() {
 	}
 
 	// =========================================================================
-	// PHASE 2: Update org credits with org strongRefs
+	// PHASE 2: Link org credits via IGDB companies endpoint
 	// =========================================================================
 	const phase2 = getPhase.get('linkCredits') as { offset: number; done: number } | undefined
 	if (phase2?.done) {
@@ -282,8 +281,8 @@ async function main() {
 
 	console.log('\n=== Phase 2: Link org credits ===')
 
-	// Load all existing org.credit records from HappyView so we can preserve
-	// their existing fields when we update them.
+	// Load all existing org.credit records from HappyView, indexed by
+	// (displayName, gameUri) so we can match them to IGDB companies.
 	console.log('[backfill-orgs] Loading org.credit records from HappyView...')
 	const sql = postgres(HAPPYVIEW_DATABASE_URL)
 	const creditRows = await sql`
@@ -291,26 +290,36 @@ async function main() {
 		FROM records
 		WHERE collection = ${COLLECTION_CREDIT}
 	` as Array<{ uri: string; rkey: string; record: Record<string, unknown> }>
-	const creditsByUri = new Map<string, { rkey: string; record: Record<string, unknown> }>()
+
+	const creditsByKey = new Map<string, Array<{ uri: string; rkey: string; record: Record<string, unknown> }>>()
 	for (const row of creditRows) {
-		creditsByUri.set(row.uri, { rkey: row.rkey, record: row.record })
+		const displayName = row.record.displayName as string | undefined
+		const gameUri = (row.record.game as { uri?: string })?.uri
+		if (!displayName || !gameUri) continue
+		const key = `${displayName}\0${gameUri}`
+		let list = creditsByKey.get(key)
+		if (!list) {
+			list = []
+			creditsByKey.set(key, list)
+		}
+		list.push(row)
 	}
-	console.log(`  Loaded ${creditsByUri.size} credit records from HappyView`)
+	console.log(`  Loaded ${creditRows.length} credit records from HappyView (${creditsByKey.size} unique name+game keys)`)
 
 	const startOffset2 = phase2?.offset ?? 0
 
 	const fields2 = [
-		'fields company, game, developer, publisher, porting, supporting, updated_at;',
+		'fields name, developed, published, updated_at;',
 	].join(' ')
 
 	let linked = 0
 	let alreadyLinked = 0
 	let missingCredit = 0
+	let missingGame = 0
 	let missingOrg = 0
-	let noCompany = 0
 	let lastOffset2 = startOffset2
 
-	let updateBatch: Array<{ rkey: string; record: Record<string, unknown>; involvedId: number }> = []
+	let updateBatch: Array<{ rkey: string; record: Record<string, unknown>; key: string }> = []
 
 	const flushUpdates = async () => {
 		if (updateBatch.length === 0) return
@@ -323,7 +332,7 @@ async function main() {
 				})),
 			)
 			for (const entry of updateBatch) {
-				markLinked.run(String(entry.involvedId))
+				markLinked.run(entry.key)
 				linked++
 			}
 			console.log(`  [batch] Linked ${updateBatch.length} credits (${linked} total)`)
@@ -332,56 +341,68 @@ async function main() {
 			for (const entry of updateBatch) {
 				try {
 					await atproto.putRecord(COLLECTION_CREDIT, entry.rkey, entry.record)
-					markLinked.run(String(entry.involvedId))
+					markLinked.run(entry.key)
 					linked++
 				} catch (innerErr) {
-					console.error(`  [!] ${errorLabel(innerErr)} credit ${entry.involvedId}: ${(innerErr as Error).message}`)
+					console.error(`  [!] ${errorLabel(innerErr)} credit ${entry.key}: ${(innerErr as Error).message}`)
 				}
 			}
 		}
 		updateBatch = []
 	}
 
-	for await (const { items, offset: currentOffset } of igdb.paginate<IGDBInvolvedCompany>(
-		'involved_companies',
+	for await (const { items, offset: currentOffset } of igdb.paginate<IGDBCompany>(
+		'companies',
 		fields2,
 		startOffset2,
 	)) {
-		for (const ic of items) {
-			if (isLinked.get(String(ic.id))) {
-				alreadyLinked++
-				continue
-			}
-
-			// Look up the credit record
-			const creditUri = state.getEntity('orgCredit', ic.id)
-			if (!creditUri) { missingCredit++; continue }
-
-			const existing = creditsByUri.get(creditUri)
-			if (!existing) { missingCredit++; continue }
-
-			// Look up the company
-			const companyId = typeof ic.company === 'object' ? ic.company?.id : ic.company
-			if (!companyId) { noCompany++; continue }
-
-			let orgEntry = orgCids.get(companyId)
+		for (const company of items) {
+			// Look up the org profile for this company
+			let orgEntry = orgCids.get(company.id)
 			if (!orgEntry) {
-				const row = getCid.get(String(companyId)) as { at_uri: string; cid: string } | undefined
+				const row = getCid.get(String(company.id)) as { at_uri: string; cid: string } | undefined
 				if (row) {
 					orgEntry = { uri: row.at_uri, cid: row.cid }
-					orgCids.set(companyId, orgEntry)
+					orgCids.set(company.id, orgEntry)
 				}
 			}
 			if (!orgEntry) { missingOrg++; continue }
 
-			// Merge the org strongRef into the existing record
-			const record = { ...existing.record }
-			delete record.$type
-			record.org = { uri: orgEntry.uri, cid: orgEntry.cid }
+			// Collect all game IDs this company is associated with
+			const gameIds = new Set<number>()
+			if (company.developed) for (const id of company.developed) gameIds.add(id)
+			if (company.published) for (const id of company.published) gameIds.add(id)
 
-			updateBatch.push({ rkey: existing.rkey, record, involvedId: ic.id })
-			if (updateBatch.length >= UPDATE_BATCH_SIZE) {
-				await flushUpdates()
+			for (const gameId of gameIds) {
+				const gameUri = state.getEntity('game', gameId)
+				if (!gameUri) { missingGame++; continue }
+
+				const key = `${company.name}\0${gameUri}`
+
+				if (isLinked.get(key)) {
+					alreadyLinked++
+					continue
+				}
+
+				const matches = creditsByKey.get(key)
+				if (!matches || matches.length === 0) { missingCredit++; continue }
+
+				for (const match of matches) {
+					// Skip if this credit already has an org linked
+					if (match.record.org) {
+						alreadyLinked++
+						continue
+					}
+
+					const record = { ...match.record }
+					delete record.$type
+					record.org = { uri: orgEntry.uri, cid: orgEntry.cid }
+
+					updateBatch.push({ rkey: match.rkey, record, key })
+					if (updateBatch.length >= UPDATE_BATCH_SIZE) {
+						await flushUpdates()
+					}
+				}
 			}
 		}
 		lastOffset2 = currentOffset + items.length
@@ -396,8 +417,8 @@ async function main() {
 	console.log(`  Linked: ${linked}`)
 	console.log(`  Already linked (resumed): ${alreadyLinked}`)
 	console.log(`  Missing credit record: ${missingCredit}`)
+	console.log(`  Missing game in state: ${missingGame}`)
 	console.log(`  Missing org profile: ${missingOrg}`)
-	console.log(`  No company on IGDB record: ${noCompany}`)
 
 	state.close()
 	await sql.end()
