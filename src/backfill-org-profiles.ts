@@ -293,8 +293,9 @@ async function main() {
 
 	const creditsByKey = new Map<string, Array<{ uri: string; rkey: string; record: Record<string, unknown> }>>()
 	for (const row of creditRows) {
-		const displayName = row.record.displayName as string | undefined
-		const gameUri = (row.record.game as { uri?: string })?.uri
+		const rec = typeof row.record === 'string' ? JSON.parse(row.record) : row.record
+		const displayName = rec.displayName as string | undefined
+		const gameUri = (rec.game as { uri?: string })?.uri
 		if (!displayName || !gameUri) continue
 		const key = `${displayName}\0${gameUri}`
 		let list = creditsByKey.get(key)
@@ -302,7 +303,7 @@ async function main() {
 			list = []
 			creditsByKey.set(key, list)
 		}
-		list.push(row)
+		list.push({ ...row, record: rec })
 	}
 	console.log(`  Loaded ${creditRows.length} credit records from HappyView (${creditsByKey.size} unique name+game keys)`)
 
