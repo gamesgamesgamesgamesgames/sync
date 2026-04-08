@@ -13,6 +13,7 @@
 		"backfill-org-profiles": "tsx src/backfill-org-profiles.ts",
 		"backfill-grac-nineteen": "tsx src/backfill-grac-nineteen.ts",
 		"backfill-twitch-ids": "tsx src/backfill-twitch-ids.ts",
+		"backfill-slugs": "tsx src/backfill-slugs.ts",
 		"transform": "tsx src/run-transformers.ts",
 		"steam-enrich": "tsx src/steam-enrich.ts",
 		"steamspy-enrich": "tsx src/steamspy-enrich.ts",

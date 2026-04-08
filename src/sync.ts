@@ -27,6 +27,7 @@ import {
 	// mapOrgCredit,
 } from './atproto/mapping.js'
 import { syncEntityType, type SyncEntityConfig } from './pipeline/sync-entities.js'
+import { slugify } from './helpers.js'
 import type {
 	// IGDBPlatformFamily,
 	IGDBPlatform,
@@ -177,7 +178,7 @@ async function main() {
 		collection: 'games.gamesgamesgamesgames.game',
 		updateBatchSize: 10,
 		concurrency: 20,
-		getSlug: (item) => item.slug,
+		getSlug: (item) => item.slug || slugify(item.name),
 		happyviewUrl: HAPPYVIEW_URL,
 		happyviewApiKey: process.env.HAPPYVIEW_API_KEY,
 		startOffset: state.getLastSyncAt('game') ? 0 : state.getEntityCount('game'),

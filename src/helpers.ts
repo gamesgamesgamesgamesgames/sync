@@ -1,5 +1,20 @@
 import { XRPCError } from '@atproto/xrpc'
 
+/**
+ * Convert a game name to a URL-friendly slug.
+ * Matches IGDB's slug format: lowercase, hyphens for spaces/special chars,
+ * no consecutive hyphens, no leading/trailing hyphens.
+ */
+export function slugify(name: string): string {
+	return name
+		.toLowerCase()
+		.normalize('NFD')
+		.replace(/[\u0300-\u036f]/g, '') // strip diacritics
+		.replace(/[^a-z0-9]+/g, '-')     // non-alphanumeric → hyphen
+		.replace(/-+/g, '-')             // collapse consecutive hyphens
+		.replace(/^-|-$/g, '')           // trim leading/trailing hyphens
+}
+
 /** Return a service label prefix based on the error type. */
 export function errorLabel(err: unknown): string {
 	if (err instanceof XRPCError) return '[atproto]'
