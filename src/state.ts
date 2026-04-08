@@ -27,6 +27,7 @@ export type EntityType =
 	| 'engine'
 	| 'collection'
 	| 'game'
+	| 'org'
 	| 'orgCredit'
 
 export interface BlobCacheEntry {

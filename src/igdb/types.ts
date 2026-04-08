@@ -210,6 +210,23 @@ export interface IGDBMultiplayerMode {
 	game?: number
 }
 
+export interface IGDBCompany {
+	id: number
+	name: string
+	slug?: string
+	description?: string
+	country?: number
+	start_date?: number
+	start_date_category?: number
+	logo?: { id: number; image_id: string; width?: number; height?: number } | number
+	websites?: IGDBWebsite[]
+	parent?: { id: number; name?: string } | number
+	status?: { id: number; name?: string } | number
+	developed?: number[]
+	published?: number[]
+	updated_at?: number
+}
+
 export interface IGDBInvolvedCompany {
 	id: number
 	company?: { id: number; name?: string; slug?: string } | number

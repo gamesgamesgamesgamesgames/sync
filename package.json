@@ -10,6 +10,7 @@
 		"backfill-steam-map": "tsx src/backfill-steam-map.ts",
 		"backfill-blobs-1080p": "tsx src/backfill-blobs-1080p.ts",
 		"backfill-collections": "tsx src/backfill-collections.ts",
+		"backfill-org-profiles": "tsx src/backfill-org-profiles.ts",
 		"backfill-grac-nineteen": "tsx src/backfill-grac-nineteen.ts",
 		"backfill-twitch-ids": "tsx src/backfill-twitch-ids.ts",
 		"transform": "tsx src/run-transformers.ts",
