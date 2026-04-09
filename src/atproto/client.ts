@@ -33,6 +33,11 @@ export class AtprotoClient {
 		return this.did
 	}
 
+	/** Get the current access JWT for authenticating with external XRPC services. */
+	getAccessJwt(): string {
+		return this.agent.session?.accessJwt ?? ''
+	}
+
 
 
 	/** Get the total number of records created this session. */

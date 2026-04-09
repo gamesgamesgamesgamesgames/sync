@@ -63,7 +63,7 @@ async function resolveIgdbBatch(
 	if (!resp.ok) {
 		if (resp.status === 429) {
 			console.log('[backfill-twitch] Rate limited, waiting 60s...')
-			await countdownSleep(60)
+			await countdownSleep(60, 'twitch-rate-limit')
 			return resolveIgdbBatch(igdbIds, clientId, accessToken)
 		}
 		console.error(`[backfill-twitch] Helix error: ${resp.status} ${await resp.text()}`)
@@ -110,7 +110,7 @@ async function main() {
 	const rows = allRows
 		.map((r) => {
 			const rec = typeof r.record === 'string' ? JSON.parse(r.record) : r.record
-			return { ...r, record: rec, igdb_id: rec?.externalIds?.igdb as string | undefined }
+			return { uri: r.uri as string, did: r.did as string, rkey: r.rkey as string, record: rec, igdb_id: rec?.externalIds?.igdb as string | undefined }
 		})
 		.filter((r) => r.igdb_id && !r.record?.externalIds?.twitch)
 	console.log(`[backfill-twitch] Found ${rows.length} games to resolve (of ${allRows.length} total)`)
@@ -144,14 +144,15 @@ async function main() {
 	// Write Twitch IDs back to PDS records via applyWrites
 	const toUpdate = rows.filter((r) => igdbToTwitch.has(r.igdb_id as string))
 	let updated = 0
-	const WRITE_BATCH_SIZE = 200
+	const WRITE_BATCH_SIZE = 10
 
 	for (let i = 0; i < toUpdate.length; i += WRITE_BATCH_SIZE) {
 		const batch = toUpdate.slice(i, i + WRITE_BATCH_SIZE)
 		const writes = batch.map((row) => {
-			const record = row.record as Record<string, unknown>
+			const record = { ...row.record as Record<string, unknown> }
+			delete record.$type
 			const externalIds = (record.externalIds ?? {}) as Record<string, unknown>
-			externalIds.twitch = igdbToTwitch.get(row.igdb_id as string)
+			externalIds.twitch = igdbToTwitch.get(row.igdb_id!)
 
 			return {
 				$type: 'com.atproto.repo.applyWrites#update' as const,

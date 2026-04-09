@@ -1,15 +1,10 @@
 import 'dotenv/config'
+import { AtprotoClient } from './atproto/client.js'
 
 const HAPPYVIEW_URL = process.env.HAPPYVIEW_URL
-const HAPPYVIEW_API_KEY = process.env.HAPPYVIEW_API_KEY
 
 if (!HAPPYVIEW_URL) {
 	console.error('[steamspy-enrich] HAPPYVIEW_URL is required')
-	process.exit(1)
-}
-
-if (!HAPPYVIEW_API_KEY) {
-	console.error('[steamspy-enrich] HAPPYVIEW_API_KEY is required')
 	process.exit(1)
 }
 
@@ -30,7 +25,7 @@ async function fetchTopGames(): Promise<SteamSpyGame[]> {
 	return Object.values(data)
 }
 
-async function upsertPopularity(games: SteamSpyGame[]) {
+async function upsertPopularity(games: SteamSpyGame[], accessJwt: string) {
 	if (games.length === 0) return 0
 
 	const payload = {
@@ -44,7 +39,7 @@ async function upsertPopularity(games: SteamSpyGame[]) {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',
-			'Authorization': `Bearer ${HAPPYVIEW_API_KEY}`,
+			'Authorization': `Bearer ${accessJwt}`,
 		},
 		body: JSON.stringify(payload),
 	})
@@ -59,13 +54,22 @@ async function upsertPopularity(games: SteamSpyGame[]) {
 }
 
 async function main() {
+	const { ATPROTO_SERVICE, ATPROTO_IDENTIFIER, ATPROTO_PASSWORD } = process.env
+	if (!ATPROTO_SERVICE || !ATPROTO_IDENTIFIER || !ATPROTO_PASSWORD) {
+		console.error('[steamspy-enrich] Missing ATPROTO_SERVICE, ATPROTO_IDENTIFIER, or ATPROTO_PASSWORD')
+		process.exit(1)
+	}
+
+	const atproto = new AtprotoClient(ATPROTO_SERVICE)
+	await atproto.login(ATPROTO_IDENTIFIER, ATPROTO_PASSWORD)
+
 	console.log('[steamspy-enrich] Starting SteamSpy enrichment run')
 
 	console.log('[steamspy-enrich] Fetching top games from SteamSpy...')
 	const games = await fetchTopGames()
 	console.log(`[steamspy-enrich] Got ${games.length} games, upserting via XRPC...`)
 
-	const upserted = await upsertPopularity(games)
+	const upserted = await upsertPopularity(games, atproto.getAccessJwt())
 	console.log(`[steamspy-enrich] Done — upserted ${upserted} popularity entries`)
 }
 
