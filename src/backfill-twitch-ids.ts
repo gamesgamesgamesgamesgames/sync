@@ -141,40 +141,35 @@ async function main() {
 
 	console.log(`[backfill-twitch] ${igdbToTwitch.size} of ${allIgdbIds.length} games have Twitch IDs`)
 
-	// Write Twitch IDs back to PDS records via applyWrites
-	const toUpdate = rows.filter((r) => igdbToTwitch.has(r.igdb_id as string))
+	// Write Twitch IDs back to PDS records via individual putRecord
+	const toUpdate = rows.filter((r) => igdbToTwitch.has(r.igdb_id!))
 	let updated = 0
-	const WRITE_BATCH_SIZE = 10
+	let errors = 0
 
-	for (let i = 0; i < toUpdate.length; i += WRITE_BATCH_SIZE) {
-		const batch = toUpdate.slice(i, i + WRITE_BATCH_SIZE)
-		const writes = batch.map((row) => {
-			const record = { ...row.record as Record<string, unknown> }
-			delete record.$type
-			const externalIds = (record.externalIds ?? {}) as Record<string, unknown>
-			externalIds.twitch = igdbToTwitch.get(row.igdb_id!)
+	for (const row of toUpdate) {
+		const record = { ...row.record as Record<string, unknown> }
+		delete record.$type
+		const externalIds = (record.externalIds ?? {}) as Record<string, unknown>
+		externalIds.twitch = igdbToTwitch.get(row.igdb_id!)
 
-			return {
-				$type: 'com.atproto.repo.applyWrites#update' as const,
+		try {
+			await agent.com.atproto.repo.putRecord({
+				repo: agent.session!.did,
 				collection: 'games.gamesgamesgamesgames.game',
-				rkey: row.rkey as string,
-				value: {
-					...record,
-					externalIds,
-				},
+				rkey: row.rkey,
+				record: { ...record, externalIds },
+			})
+			updated++
+			if (updated % 1000 === 0) {
+				console.log(`[backfill-twitch] Updated ${updated}/${toUpdate.length} records on PDS`)
 			}
-		})
-
-		await agent.com.atproto.repo.applyWrites({
-			repo: agent.session!.did,
-			writes,
-		})
-
-		updated += batch.length
-		console.log(`[backfill-twitch] Updated ${updated}/${toUpdate.length} records on PDS`)
+		} catch (err) {
+			console.error(`[backfill-twitch] Failed to update rkey ${row.rkey}: ${(err as Error).message}`)
+			errors++
+		}
 	}
 
-	console.log(`[backfill-twitch] Done. ${updated} games updated with Twitch IDs.`)
+	console.log(`[backfill-twitch] Done. ${updated} games updated, ${errors} errors.`)
 	await sql.end()
 }
 

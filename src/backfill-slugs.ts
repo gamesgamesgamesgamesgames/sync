@@ -10,30 +10,21 @@
 
 import 'dotenv/config'
 import postgres from 'postgres'
-import { AtprotoClient } from './atproto/client.js'
 import { slugify } from './helpers.js'
 
 async function main() {
 	const {
 		HAPPYVIEW_DATABASE_URL,
 		HAPPYVIEW_URL,
-		ATPROTO_SERVICE,
-		ATPROTO_IDENTIFIER,
-		ATPROTO_PASSWORD,
+		HAPPYVIEW_API_KEY,
 	} = process.env
 
 	if (!HAPPYVIEW_DATABASE_URL) {
 		throw new Error('Missing HAPPYVIEW_DATABASE_URL in .env')
 	}
-	if (!HAPPYVIEW_URL) {
-		throw new Error('Missing HAPPYVIEW_URL in .env')
+	if (!HAPPYVIEW_URL || !HAPPYVIEW_API_KEY) {
+		throw new Error('Missing HAPPYVIEW_URL or HAPPYVIEW_API_KEY in .env')
 	}
-	if (!ATPROTO_SERVICE || !ATPROTO_IDENTIFIER || !ATPROTO_PASSWORD) {
-		throw new Error('Missing ATPROTO_SERVICE, ATPROTO_IDENTIFIER, or ATPROTO_PASSWORD in .env')
-	}
-
-	const atproto = new AtprotoClient(ATPROTO_SERVICE)
-	await atproto.login(ATPROTO_IDENTIFIER, ATPROTO_PASSWORD)
 
 	const sql = postgres(HAPPYVIEW_DATABASE_URL)
 
@@ -93,7 +84,7 @@ async function main() {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${atproto.getAccessJwt()}`,
+					'Authorization': `Bearer ${HAPPYVIEW_API_KEY}`,
 				},
 				body: JSON.stringify({ uri, slug }),
 			})

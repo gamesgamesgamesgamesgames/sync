@@ -31,6 +31,8 @@ export interface SyncEntityConfig<T extends { id: number }> {
 	getSlug?: (item: T) => string | undefined
 	/** HappyView base URL for XRPC calls (e.g. slug writes via putGame). Required when getSlug is set. */
 	happyviewUrl?: string
+	/** HappyView API key for authenticating XRPC calls. */
+	happyviewApiKey?: string
 }
 
 export interface SyncResult {
@@ -61,12 +63,12 @@ function sortKeys(obj: unknown): unknown {
 	return sorted
 }
 
-async function putSlugViaXrpc(happyviewUrl: string, atprotoClient: AtprotoClient, uri: string, slug: string): Promise<void> {
+async function putSlugViaXrpc(happyviewUrl: string, apiKey: string, uri: string, slug: string): Promise<void> {
 	const response = await fetch(`${happyviewUrl}/xrpc/games.gamesgamesgamesgames.putGame`, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',
-			'Authorization': `Bearer ${atprotoClient.getAccessJwt()}`,
+			'Authorization': `Bearer ${apiKey}`,
 		},
 		body: JSON.stringify({ uri, slug }),
 	})
@@ -193,9 +195,9 @@ export async function syncEntityType<T extends { id: number }>(
 						if (steamId) {
 							state.setSteamMapping(entry.key, steamId, res.uri)
 						}
-						if (entry.slug && config.happyviewUrl) {
+						if (entry.slug && config.happyviewUrl && config.happyviewApiKey) {
 							try {
-								await putSlugViaXrpc(config.happyviewUrl, atproto, res.uri, entry.slug)
+								await putSlugViaXrpc(config.happyviewUrl, config.happyviewApiKey!, res.uri, entry.slug)
 							} catch (err) {
 								console.error(`  [!] Slug insert failed for ${entry.name}:`, (err as Error).message)
 							}
@@ -215,9 +217,9 @@ export async function syncEntityType<T extends { id: number }>(
 						if (steamId) {
 							state.setSteamMapping(entry.key, steamId, uri)
 						}
-						if (entry.slug && config.happyviewUrl) {
+						if (entry.slug && config.happyviewUrl && config.happyviewApiKey) {
 							try {
-								await putSlugViaXrpc(config.happyviewUrl, atproto, uri, entry.slug)
+								await putSlugViaXrpc(config.happyviewUrl, config.happyviewApiKey!, uri, entry.slug)
 							} catch (err) {
 								console.error(`  [!] Slug insert failed for ${entry.name}:`, (err as Error).message)
 							}
@@ -249,13 +251,13 @@ export async function syncEntityType<T extends { id: number }>(
 				}
 			}
 
-			if (config.getSlug && config.happyviewUrl) {
+			if (config.getSlug && config.happyviewUrl && config.happyviewApiKey) {
 				for (const entry of createBatch) {
 					if (entry.slug) {
 						const entityUri = state.getEntity(entityType, entry.id)
 						if (entityUri) {
 							try {
-								await putSlugViaXrpc(config.happyviewUrl, atproto, entityUri, entry.slug)
+								await putSlugViaXrpc(config.happyviewUrl, config.happyviewApiKey!, entityUri, entry.slug)
 							} catch (err) {
 								console.error(`  [!] Slug insert failed for ${entry.name}:`, (err as Error).message)
 							}
