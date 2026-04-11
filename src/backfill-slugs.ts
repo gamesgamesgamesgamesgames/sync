@@ -79,31 +79,48 @@ async function main() {
 			slug = `${slug}-${counter}`
 		}
 
-		try {
-			const response = await fetch(`${HAPPYVIEW_URL}/xrpc/games.gamesgamesgamesgames.putGame`, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${HAPPYVIEW_API_KEY}`,
-				},
-				body: JSON.stringify({ uri, slug }),
-			})
+		let attempt = 0
+		let success = false
+		while (attempt < 5 && !success) {
+			try {
+				const response = await fetch(`${HAPPYVIEW_URL}/xrpc/games.gamesgamesgamesgames.putGame`, {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						'Authorization': `Bearer ${HAPPYVIEW_API_KEY}`,
+					},
+					body: JSON.stringify({ uri, slug }),
+				})
 
-			if (!response.ok) {
-				const body = await response.text()
-				throw new Error(`putGame returned ${response.status}: ${body}`)
+				if (response.status === 429) {
+					const waitMs = 2000 * Math.pow(2, attempt)
+					console.log(`  [rate-limit] Waiting ${waitMs}ms...`)
+					await new Promise((r) => setTimeout(r, waitMs))
+					attempt++
+					continue
+				}
+
+				if (!response.ok) {
+					const body = await response.text()
+					throw new Error(`putGame returned ${response.status}: ${body}`)
+				}
+
+				usedSlugs.add(slug)
+				created++
+				success = true
+
+				if (created % 100 === 0) {
+					console.log(`  [backfill] Progress: ${created}/${games.length}`)
+				}
+			} catch (err) {
+				console.error(`  [!] Failed to set slug for "${name}" (${uri}):`, (err as Error).message)
+				errors++
+				break
 			}
-
-			usedSlugs.add(slug)
-			created++
-
-			if (created % 100 === 0) {
-				console.log(`  [backfill] Progress: ${created}/${games.length}`)
-			}
-		} catch (err) {
-			console.error(`  [!] Failed to set slug for "${name}" (${uri}):`, (err as Error).message)
-			errors++
 		}
+
+		// Gentle pacing between requests
+		await new Promise((r) => setTimeout(r, 50))
 	}
 
 	console.log()
