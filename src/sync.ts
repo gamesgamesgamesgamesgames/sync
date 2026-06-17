@@ -26,6 +26,7 @@ import {
 	mapGame,
 } from './atproto/mapping.js'
 import { syncEntityType, type SyncEntityConfig } from './pipeline/sync-entities.js'
+import { ContributionClient } from './contributions/client.js'
 import { syncNewCompanies } from './pipeline/sync-companies.js'
 import { slugify } from './helpers.js'
 import type {
@@ -57,11 +58,23 @@ async function main() {
 		throw new Error('Missing HAPPYVIEW_URL in .env')
 	}
 
+	const {
+		IGDB_ATPROTO_IDENTIFIER,
+		IGDB_ATPROTO_PASSWORD,
+	} = process.env
+
+	if (!IGDB_ATPROTO_IDENTIFIER || !IGDB_ATPROTO_PASSWORD) {
+		throw new Error('Missing IGDB_ATPROTO_IDENTIFIER or IGDB_ATPROTO_PASSWORD in .env')
+	}
+
 	const igdb = new IGDBClient(TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET)
 	await igdb.authenticate()
 
 	const atproto = new AtprotoClient(ATPROTO_SERVICE)
 	await atproto.login(ATPROTO_IDENTIFIER, ATPROTO_PASSWORD)
+
+	const contributionClient = new ContributionClient(HAPPYVIEW_URL, process.env.HAPPYVIEW_API_KEY ?? '')
+	await contributionClient.login(IGDB_ATPROTO_IDENTIFIER, IGDB_ATPROTO_PASSWORD)
 
 	const state = new StateManager()
 
@@ -146,6 +159,7 @@ async function main() {
 	// 4. Games
 	const gameConfig: SyncEntityConfig<IGDBGame> = {
 		entityType: 'game',
+		contributionClient,
 		igdbEndpoint: 'games',
 		igdbFields: [
 			'fields name, summary, storyline, slug, category, game_type.type,',

@@ -9,6 +9,8 @@
 import type { IGDBClient } from '../igdb/client.js'
 import type { AtprotoClient } from '../atproto/client.js'
 import type { StateManager, EntityType } from '../state.js'
+import type { ContributionClient } from '../contributions/client.js'
+import { syncGameViaContribution } from '../contributions/handler.js'
 import { errorLabel, prefetch } from '../helpers.js'
 import { flushBatch, type PendingRecord } from './batch.js'
 import { ConcurrencyPool } from '../concurrency.js'
@@ -33,6 +35,8 @@ export interface SyncEntityConfig<T extends { id: number }> {
 	happyviewUrl?: string
 	/** HappyView API key for authenticating XRPC calls. */
 	happyviewApiKey?: string
+	/** When set, games are synced via the contribution path instead of direct writes. */
+	contributionClient?: ContributionClient
 }
 
 export interface SyncResult {
@@ -148,16 +152,31 @@ export async function syncEntityType<T extends { id: number }>(
 
 			const { key, record, existingUri, name, slug } = entry.value
 
+			// Contribution path: all games go through contributions
+			if (config.contributionClient && record) {
+				try {
+					const syncResult = await syncGameViaContribution(key, record, config.contributionClient)
+
+					if (syncResult.action === 'created') {
+						console.log(`  [contributions] ${syncResult.contributionType}: ${name} (${syncResult.uri})`)
+						result.created++
+					} else {
+						result.skipped++
+					}
+				} catch (err) {
+					console.error(`  [!] Contribution failed for ${name}:`, (err as Error).message)
+					result.failed++
+				}
+				continue
+			}
+
+			// Direct write path (non-game entities) — existing logic unchanged
 			if (existingUri) {
-				// Full scan: skip existing records entirely (they haven't changed
-				// since they were written — IGDB's updated_at filter handles
-				// incremental changes on future runs).
 				if (!lastSyncAt || !record) {
 					result.skipped++
 					continue
 				}
 
-				// Incremental sync: fetch and diff before updating.
 				const rkey = existingUri.split('/').pop()!
 				const existing = await atproto.getRecord(collection, rkey)
 				if (existing && recordsEqual(existing, record, collection)) {
