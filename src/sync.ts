@@ -13,7 +13,6 @@
 
 import 'dotenv/config'
 
-import Database from 'better-sqlite3'
 import { IGDBClient } from './igdb/client.js'
 import { AtprotoClient } from './atproto/client.js'
 import { StateManager } from './state.js'
@@ -96,28 +95,6 @@ async function main() {
 	console.log('=== IGDB → atproto Nightly Sync ===')
 	console.log(`Started at ${new Date().toISOString()}`)
 	console.log()
-
-	// Validate state vs PDS to prevent duplicate creation
-	const pdsStorePath = process.env.PDS_STORE_PATH ?? '/pds/actors/29/did:web:gamesgamesgamesgames.games/store.sqlite'
-	try {
-		const pdsDb = new Database(pdsStorePath, { readonly: true })
-		const pdsRow = pdsDb.prepare(
-			"SELECT COUNT(*) as count FROM record WHERE collection = 'games.gamesgamesgamesgames.game'",
-		).get() as { count: number }
-		pdsDb.close()
-
-		const stateCount = state.getEntityCount('game')
-		console.log(`[sync] PDS game records: ${pdsRow.count}, State entities: ${stateCount}`)
-
-		if (pdsRow.count > 0 && stateCount < pdsRow.count * 0.9) {
-			console.error(`[sync] ABORT: state.sqlite is out of sync with PDS (state=${stateCount}, PDS=${pdsRow.count}).`)
-			console.error('[sync] This would cause duplicate record creation. Run cleanup first.')
-			process.exit(1)
-		}
-	} catch (err) {
-		console.warn(`[sync] Could not validate PDS store at ${pdsStorePath}: ${(err as Error).message}`)
-		console.warn('[sync] Continuing without validation (set PDS_STORE_PATH if running on server)')
-	}
 
 	// Sync in dependency order
 

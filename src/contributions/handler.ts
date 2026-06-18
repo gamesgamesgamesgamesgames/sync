@@ -1,5 +1,8 @@
 import type { ContributionClient } from './client.js'
 import { diffGameRecord } from './diff.js'
+import { contentHashRkey } from './hash.js'
+
+const CONTRIBUTION_COLLECTION = 'games.gamesgamesgamesgames.contribution'
 
 export interface ContributionSyncResult {
 	action: 'created' | 'skipped'
@@ -22,9 +25,16 @@ export async function syncGameViaContribution(
 	const existing = await contributionClient.getGameByIgdbId(igdbId)
 
 	if (!existing) {
+		const rkey = contentHashRkey(mappedRecord)
+		const existingRecord = await contributionClient.getRecord(CONTRIBUTION_COLLECTION, rkey)
+		if (existingRecord) {
+			return { action: 'skipped' }
+		}
+
 		const result = await contributionClient.createContribution({
 			contributionType: 'newGame',
 			changes: mappedRecord,
+			rkey,
 		})
 		return { action: 'created', contributionType: 'newGame', uri: result.uri }
 	}
@@ -35,11 +45,18 @@ export async function syncGameViaContribution(
 		return { action: 'skipped' }
 	}
 
+	const rkey = contentHashRkey(changes)
+	const existingRecord = await contributionClient.getRecord(CONTRIBUTION_COLLECTION, rkey)
+	if (existingRecord) {
+		return { action: 'skipped' }
+	}
+
 	const subjectUri = existing.uri
 	const result = await contributionClient.createContribution({
 		contributionType: 'correction',
 		changes,
 		subject: subjectUri,
+		rkey,
 	})
 
 	if (existing.redirectedFrom) {

@@ -104,10 +104,33 @@ export class ContributionClient {
 		}
 	}
 
+	async getRecord(collection: string, rkey: string): Promise<Record<string, unknown> | null> {
+		if (!this.session) {
+			throw new Error('Not authenticated — call restore() first')
+		}
+
+		const response = await fetch(
+			`${this.instanceUrl}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(this.session.did)}&collection=${encodeURIComponent(collection)}&rkey=${encodeURIComponent(rkey)}`,
+			{ headers: { 'X-Client-Key': this.clientKey } },
+		)
+
+		if (response.status === 404 || response.status === 400) {
+			return null
+		}
+
+		if (!response.ok) {
+			const body = await response.text()
+			throw new Error(`getRecord returned ${response.status}: ${body}`)
+		}
+
+		return await response.json() as Record<string, unknown>
+	}
+
 	async createContribution(params: {
 		contributionType: 'correction' | 'addition' | 'newGame'
 		changes: Record<string, unknown>
 		subject?: string
+		rkey?: string
 	}): Promise<ContributionResult> {
 		if (!this.session) {
 			throw new Error('Not authenticated — call restore() first')
@@ -119,6 +142,9 @@ export class ContributionClient {
 		}
 		if (params.subject) {
 			body.subject = params.subject
+		}
+		if (params.rkey) {
+			body.rkey = params.rkey
 		}
 
 		const response = await this.session.fetchHandler(
