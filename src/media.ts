@@ -6,9 +6,13 @@
  */
 
 import type { IGDBClient } from './igdb/client.js'
-import type { AtprotoClient } from './atproto/client.js'
 import type { StateManager } from './state.js'
 import { ConcurrencyPool } from './concurrency.js'
+
+/** Any object that can upload blobs — satisfied by both AtprotoClient and ContributionClient. */
+export interface BlobUploader {
+	uploadBlob(data: Uint8Array, mimeType: string): Promise<{ ref: { $link: string }; mimeType: string; size: number }>
+}
 
 /** The blob reference shape used in atproto records. */
 export interface BlobRef {
@@ -46,7 +50,7 @@ export async function uploadIGDBImage(
 	imageId: string,
 	size: string,
 	igdb: IGDBClient,
-	atproto: AtprotoClient,
+	atproto: BlobUploader,
 	state: StateManager,
 ): Promise<BlobRef | null> {
 	// Check cache first
@@ -95,7 +99,7 @@ export async function buildMediaItem(
 	width: number | undefined,
 	height: number | undefined,
 	igdb: IGDBClient,
-	atproto: AtprotoClient,
+	atproto: BlobUploader,
 	state: StateManager,
 	title?: string,
 ): Promise<MediaItem | null> {
@@ -153,7 +157,7 @@ function getUploadPool(): ConcurrencyPool {
 export async function buildMediaItemsConcurrent(
 	tasks: ImageTask[],
 	igdb: IGDBClient,
-	atproto: AtprotoClient,
+	atproto: BlobUploader,
 	state: StateManager,
 ): Promise<MediaItem[]> {
 	const dlPool = getDownloadPool()

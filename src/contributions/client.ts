@@ -54,6 +54,33 @@ export class ContributionClient {
 		console.log(`[contributions] Restored session for ${session.did}`)
 	}
 
+	async uploadBlob(data: Uint8Array, mimeType: string): Promise<{ ref: { $link: string }; mimeType: string; size: number }> {
+		if (!this.session) {
+			throw new Error('Not authenticated — call restore() first')
+		}
+
+		const response = await this.session.fetchHandler(
+			`${this.instanceUrl}/xrpc/com.atproto.repo.uploadBlob`,
+			{
+				method: 'POST',
+				headers: { 'Content-Type': mimeType },
+				body: Buffer.from(data),
+			},
+		)
+
+		if (!response.ok) {
+			const errorBody = await response.text()
+			throw new Error(`uploadBlob returned ${response.status}: ${errorBody}`)
+		}
+
+		const result = await response.json() as { blob: { ref: { $link: string }; mimeType: string; size: number } }
+		return {
+			ref: result.blob.ref,
+			mimeType: result.blob.mimeType,
+			size: result.blob.size,
+		}
+	}
+
 	async getGameByIgdbId(igdbId: string): Promise<GameLookupResult | null> {
 		const url = `${this.instanceUrl}/xrpc/games.gamesgamesgamesgames.getGame?igdbId=${encodeURIComponent(igdbId)}`
 		const response = await fetch(url, {

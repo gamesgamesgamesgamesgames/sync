@@ -215,7 +215,7 @@ async function main() {
 				}
 			}
 
-			return mapGame(item, igdb, atproto, state, { existingMedia })
+			return mapGame(item, igdb, atproto, state, { existingMedia, blobUploader: contributionClient })
 		},
 	}
 	await syncEntityType(gameConfig, igdb, atproto, state)

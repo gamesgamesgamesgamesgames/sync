@@ -6,7 +6,7 @@ import type { StateManager } from '../state.js'
 import type { IGDBClient } from '../igdb/client.js'
 import type { AtprotoClient } from '../atproto/client.js'
 import { buildMediaItem, buildMediaItemsConcurrent } from '../media.js'
-import type { ImageTask } from '../media.js'
+import type { ImageTask, BlobUploader } from '../media.js'
 import {
 	IGDB_PLATFORM_CATEGORY,
 	IGDB_WEBSITE_CATEGORY,
@@ -266,6 +266,8 @@ export interface MapGameOptions {
 	/** Existing media array from the matched record. If provided and image IDs
 	 *  haven't changed, the existing media is reused without downloading. */
 	existingMedia?: Array<Record<string, unknown>>
+	/** Upload blobs to a different repo (e.g. igdb.kart.sh for contributions). */
+	blobUploader?: BlobUploader
 }
 
 /** Extract external IDs from IGDB game websites. */
@@ -444,6 +446,7 @@ export async function mapGame(
 	}
 
 	// If existing media is provided, check if image IDs match — reuse if unchanged
+	const uploader = options?.blobUploader ?? atproto
 	if (options?.existingMedia && options.existingMedia.length > 0) {
 		const existingImageIds = new Set(
 			options.existingMedia
@@ -457,11 +460,11 @@ export async function mapGame(
 		if (unchanged) {
 			record.media = options.existingMedia
 		} else if (imageTasks.length > 0) {
-			const media = await buildMediaItemsConcurrent(imageTasks, igdbClient, atproto, state)
+			const media = await buildMediaItemsConcurrent(imageTasks, igdbClient, uploader, state)
 			if (media.length > 0) record.media = media
 		}
 	} else if (imageTasks.length > 0) {
-		const media = await buildMediaItemsConcurrent(imageTasks, igdbClient, atproto, state)
+		const media = await buildMediaItemsConcurrent(imageTasks, igdbClient, uploader, state)
 		if (media.length > 0) record.media = media
 	}
 
