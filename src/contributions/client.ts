@@ -34,6 +34,7 @@ export class ContributionClient {
 			clientKey: options.clientKey,
 			clientSecret: options.clientSecret,
 			redirectUri: 'http://127.0.0.1:9473/oauth/callback',
+			scopes: 'atproto transition:generic',
 			storage: new FileStorage(options.storagePath),
 		})
 	}
