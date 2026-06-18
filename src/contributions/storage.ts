@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { readFile, writeFile, unlink, mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
@@ -11,8 +12,8 @@ export class FileStorage {
 	}
 
 	private path(key: string): string {
-		const safe = key.replace(/[^a-zA-Z0-9_:-]/g, '_')
-		return join(this.dir, `${safe}.json`)
+		const hash = createHash('sha256').update(key).digest('hex').slice(0, 32)
+		return join(this.dir, `${hash}.json`)
 	}
 
 	async get(key: string): Promise<string | null> {
