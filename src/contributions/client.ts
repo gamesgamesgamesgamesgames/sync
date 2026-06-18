@@ -1,4 +1,5 @@
-import { AtpAgent } from '@atproto/api'
+import { HappyViewNodeClient } from '@happyview/oauth-client-node'
+import { FileStorage } from './storage.js'
 
 export interface GameLookupResult {
 	uri: string
@@ -10,34 +11,52 @@ export interface ContributionResult {
 	uri: string
 }
 
+export interface ContributionClientOptions {
+	instanceUrl: string
+	clientId: string
+	clientKey: string
+	clientSecret: string
+	storagePath?: string
+}
+
 export class ContributionClient {
-	private agent: AtpAgent
-	private happyviewUrl: string
-	private happyviewApiKey: string
-	private did: string = ''
+	private hvClient: HappyViewNodeClient
+	private session: Awaited<ReturnType<HappyViewNodeClient['restore']>> | null = null
+	private instanceUrl: string
+	private clientKey: string
 
-	constructor(happyviewUrl: string, happyviewApiKey: string) {
-		this.happyviewUrl = happyviewUrl
-		this.happyviewApiKey = happyviewApiKey
-		this.agent = new AtpAgent({ service: happyviewUrl })
+	constructor(options: ContributionClientOptions) {
+		this.instanceUrl = options.instanceUrl
+		this.clientKey = options.clientKey
+		this.hvClient = new HappyViewNodeClient({
+			instanceUrl: options.instanceUrl,
+			clientId: options.clientId,
+			clientKey: options.clientKey,
+			clientSecret: options.clientSecret,
+			redirectUri: 'http://127.0.0.1:9473/oauth/callback',
+			storage: new FileStorage(options.storagePath),
+		})
 	}
 
-	async login(identifier: string, password: string): Promise<void> {
-		const result = await this.agent.login({ identifier, password })
-		this.did = result.data.did
-		console.log(`[contributions] Logged in as ${this.did} (${identifier})`)
+	get oauthClient(): HappyViewNodeClient {
+		return this.hvClient
 	}
 
-	/**
-	 * Look up a game by IGDB ID via HappyView's getGame XRPC.
-	 * Returns the current record (with redirect resolution) or null if not found.
-	 */
+	async restore(did: string): Promise<void> {
+		const session = await this.hvClient.restore(did)
+		if (!session) {
+			throw new Error(
+				`No stored session for ${did}. Run "npm run setup-auth" to authenticate first.`,
+			)
+		}
+		this.session = session
+		console.log(`[contributions] Restored session for ${session.did}`)
+	}
+
 	async getGameByIgdbId(igdbId: string): Promise<GameLookupResult | null> {
-		const url = `${this.happyviewUrl}/xrpc/games.gamesgamesgamesgames.getGame?igdbId=${encodeURIComponent(igdbId)}`
+		const url = `${this.instanceUrl}/xrpc/games.gamesgamesgamesgames.getGame?igdbId=${encodeURIComponent(igdbId)}`
 		const response = await fetch(url, {
-			headers: {
-				'Authorization': `Bearer ${this.happyviewApiKey}`,
-			},
+			headers: { 'X-Client-Key': this.clientKey },
 		})
 
 		if (response.status === 404 || response.status === 400) {
@@ -57,18 +76,13 @@ export class ContributionClient {
 		}
 	}
 
-	/**
-	 * Create a contribution via HappyView's createContribution XRPC.
-	 * Authenticated as the IGDB scraper identity.
-	 */
 	async createContribution(params: {
 		contributionType: 'correction' | 'addition' | 'newGame'
 		changes: Record<string, unknown>
 		subject?: string
 	}): Promise<ContributionResult> {
-		const accessJwt = this.agent.session?.accessJwt
-		if (!accessJwt) {
-			throw new Error('Not authenticated — call login() first')
+		if (!this.session) {
+			throw new Error('Not authenticated — call restore() first')
 		}
 
 		const body: Record<string, unknown> = {
@@ -79,14 +93,11 @@ export class ContributionClient {
 			body.subject = params.subject
 		}
 
-		const response = await fetch(
-			`${this.happyviewUrl}/xrpc/games.gamesgamesgamesgames.createContribution`,
+		const response = await this.session.fetchHandler(
+			`${this.instanceUrl}/xrpc/games.gamesgamesgamesgames.createContribution`,
 			{
 				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${accessJwt}`,
-				},
+				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(body),
 			},
 		)

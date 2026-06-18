@@ -8,3 +8,4 @@ state.sqlite-wal
 .DS_Store
 docs/plans/
 deploy.sh
+.happyview-sessions/

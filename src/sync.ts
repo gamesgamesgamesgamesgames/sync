@@ -59,12 +59,14 @@ async function main() {
 	}
 
 	const {
-		IGDB_ATPROTO_IDENTIFIER,
-		IGDB_ATPROTO_PASSWORD,
+		IGDB_ATPROTO_DID,
+		HAPPYVIEW_CLIENT_ID,
+		HAPPYVIEW_CLIENT_KEY,
+		HAPPYVIEW_CLIENT_SECRET,
 	} = process.env
 
-	if (!IGDB_ATPROTO_IDENTIFIER || !IGDB_ATPROTO_PASSWORD) {
-		throw new Error('Missing IGDB_ATPROTO_IDENTIFIER or IGDB_ATPROTO_PASSWORD in .env')
+	if (!IGDB_ATPROTO_DID || !HAPPYVIEW_CLIENT_ID || !HAPPYVIEW_CLIENT_KEY || !HAPPYVIEW_CLIENT_SECRET) {
+		throw new Error('Missing IGDB_ATPROTO_DID, HAPPYVIEW_CLIENT_ID, HAPPYVIEW_CLIENT_KEY, or HAPPYVIEW_CLIENT_SECRET in .env')
 	}
 
 	const igdb = new IGDBClient(TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET)
@@ -73,8 +75,13 @@ async function main() {
 	const atproto = new AtprotoClient(ATPROTO_SERVICE)
 	await atproto.login(ATPROTO_IDENTIFIER, ATPROTO_PASSWORD)
 
-	const contributionClient = new ContributionClient(HAPPYVIEW_URL, process.env.HAPPYVIEW_API_KEY ?? '')
-	await contributionClient.login(IGDB_ATPROTO_IDENTIFIER, IGDB_ATPROTO_PASSWORD)
+	const contributionClient = new ContributionClient({
+		instanceUrl: HAPPYVIEW_URL,
+		clientId: HAPPYVIEW_CLIENT_ID,
+		clientKey: HAPPYVIEW_CLIENT_KEY,
+		clientSecret: HAPPYVIEW_CLIENT_SECRET,
+	})
+	await contributionClient.restore(IGDB_ATPROTO_DID)
 
 	const state = new StateManager()
 

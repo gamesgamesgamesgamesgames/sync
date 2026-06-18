@@ -14,6 +14,7 @@
 		"backfill-grac-nineteen": "tsx src/backfill-grac-nineteen.ts",
 		"backfill-twitch-ids": "tsx src/backfill-twitch-ids.ts",
 		"backfill-slugs": "tsx src/backfill-slugs.ts",
+		"setup-auth": "tsx src/setup-auth.ts",
 		"transform": "tsx src/run-transformers.ts",
 		"steam-enrich": "tsx src/steam-enrich.ts",
 		"steamspy-enrich": "tsx src/steamspy-enrich.ts",
@@ -22,6 +23,7 @@
 	},
 	"dependencies": {
 		"@atproto/api": "^0.15.0",
+		"@happyview/oauth-client-node": "^1.0.0-dev.1",
 		"@aws-sdk/client-s3": "^3.1004.0",
 		"better-sqlite3": "^12.6.2",
 		"dotenv": "^16.4.0",
