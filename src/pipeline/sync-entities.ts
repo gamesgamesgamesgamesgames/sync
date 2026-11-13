@@ -9,7 +9,7 @@
 import type { IGDBClient } from '../igdb/client.js'
 import type { AtprotoClient } from '../atproto/client.js'
 import type { StateManager, EntityType } from '../state.js'
-import type { ContributionClient } from '../contributions/client.js'
+import { ContributionRequestError, type ContributionClient } from '../contributions/client.js'
 import { syncGameViaContribution } from '../contributions/handler.js'
 import { errorLabel, prefetch } from '../helpers.js'
 import { flushBatch, type PendingRecord } from './batch.js'
@@ -44,6 +44,23 @@ export interface SyncResult {
 	updated: number
 	skipped: number
 	failed: number
+	/** Failures a later run may get past (rate limits, auth, outages, bugs). */
+	retryable: number
+	/** Whether the incremental-sync cursor moved forward. */
+	cursorAdvanced: boolean
+}
+
+/**
+ * Whether a failure will happen again however often it is retried: HappyView
+ * refused the request itself (a 4xx other than auth, timeout or rate limit).
+ * Those are recorded for review and do not hold the cursor back. Everything
+ * else, including errors from our own code, holds it back so the next run
+ * tries the same window again.
+ */
+export function isPermanentFailure(err: unknown): boolean {
+	if (!(err instanceof ContributionRequestError)) return false
+	const { status } = err
+	return status >= 400 && status < 500 && ![401, 403, 408, 429].includes(status)
 }
 
 /** Deep-compare two records, ignoring the `$type` field added by the PDS. */
@@ -105,7 +122,7 @@ export async function syncEntityType<T extends { id: number }>(
 		console.log(`[sync] ${entityType}: full scan (no previous sync timestamp)`)
 	}
 
-	const result: SyncResult = { created: 0, updated: 0, skipped: 0, failed: 0 }
+	const result: SyncResult = { created: 0, updated: 0, skipped: 0, failed: 0, retryable: 0, cursorAdvanced: false }
 	const pool = new ConcurrencyPool(concurrency)
 	let totalProcessed = 0
 
@@ -147,6 +164,7 @@ export async function syncEntityType<T extends { id: number }>(
 			if (entry.status === 'rejected') {
 				console.error(`  [!] ${errorLabel(entry.reason)} ${entityType} sync failed:`, (entry.reason as Error).message)
 				result.failed++
+				result.retryable++
 				continue
 			}
 
@@ -166,6 +184,11 @@ export async function syncEntityType<T extends { id: number }>(
 				} catch (err) {
 					console.error(`  [!] Contribution failed for ${name}:`, (err as Error).message)
 					result.failed++
+					if (isPermanentFailure(err)) {
+						state.addFailure(entityType, key)
+					} else {
+						result.retryable++
+					}
 				}
 				continue
 			}
@@ -246,6 +269,7 @@ export async function syncEntityType<T extends { id: number }>(
 					} catch (putErr) {
 						console.error(`  [!] ${errorLabel(putErr)} Update failed: ${entry.name}:`, (putErr as Error).message)
 						result.failed++
+						result.retryable++
 					}
 				}
 			}
@@ -290,7 +314,14 @@ export async function syncEntityType<T extends { id: number }>(
 		console.log(`  [sync] ${entityType}: offset ${offset + items.length} (batch took ${batchElapsed}s)`)
 	}
 
-	state.setLastSyncAt(entityType, syncStartedAt)
-	console.log(`[sync] ${entityType}: done (created=${result.created}, updated=${result.updated}, skipped=${result.skipped}, failed=${result.failed})`)
+	// Moving the cursor past a failure drops that entity until IGDB touches it
+	// again, so only move it when nothing failed in a way a rerun could fix.
+	if (result.retryable === 0) {
+		state.setLastSyncAt(entityType, syncStartedAt)
+		result.cursorAdvanced = true
+	} else {
+		console.warn(`[sync] ${entityType}: ${result.retryable} retryable failure(s); keeping the cursor at ${lastSyncAt ? new Date(lastSyncAt * 1000).toISOString() : 'none'} so the next run retries them`)
+	}
+	console.log(`[sync] ${entityType}: done (created=${result.created}, updated=${result.updated}, skipped=${result.skipped}, failed=${result.failed}, retryable=${result.retryable})`)
 	return result
 }
