@@ -9,9 +9,45 @@ import type { IGDBClient } from './igdb/client.js'
 import type { StateManager } from './state.js'
 import { ConcurrencyPool } from './concurrency.js'
 
+export interface UploadedBlob { ref: { $link: string }; mimeType: string; size: number }
+
+export interface UploadOptions {
+	/** The IGDB image the bytes came from, when there is one. */
+	imageId?: string
+}
+
 /** Any object that can upload blobs — satisfied by both AtprotoClient and ContributionClient. */
 export interface BlobUploader {
-	uploadBlob(data: Uint8Array, mimeType: string): Promise<{ ref: { $link: string }; mimeType: string; size: number }>
+	uploadBlob(data: Uint8Array, mimeType: string, options?: UploadOptions): Promise<UploadedBlob>
+	/** Optional: whether a blob already in the cache still has to reach another repo. */
+	needsMirror?(imageId: string): boolean
+	/** Optional: send a cached blob's bytes to that other repo. */
+	mirrorCached?(imageId: string, data: Uint8Array, mimeType: string): Promise<void>
+}
+
+/** A repo the mirror copies blobs into. One attempt per blob, no waiting. */
+export interface MirrorTarget {
+	uploadBlobOnce(data: Uint8Array, mimeType: string): Promise<UploadedBlob>
+}
+
+/** Where the mirror records which cached blobs it has copied. */
+export interface MirrorLedger {
+	isBlobMirrored(imageId: string): boolean
+	setBlobMirrored(imageId: string): void
+}
+
+/**
+ * Fails loudly when the account the sync logged in with is not the catalogue
+ * account. Mirrored media would otherwise land in some other repo and every
+ * auto-accepted media change would fall back.
+ */
+export function assertCatalogueAccount(actualDid: string, expectedDid: string | undefined): void {
+	if (!expectedDid) {
+		throw new Error('PENTARACT_DID is not set: it must name the catalogue account game media is mirrored to')
+	}
+	if (actualDid !== expectedDid) {
+		throw new Error(`ATPROTO_IDENTIFIER logs in as ${actualDid}, but PENTARACT_DID is ${expectedDid}: refusing to mirror media into the wrong repo`)
+	}
 }
 
 /**
@@ -27,20 +63,36 @@ export interface BlobUploader {
 export class MirroringBlobUploader implements BlobUploader {
 	constructor(
 		private readonly primary: BlobUploader,
-		private readonly mirror: BlobUploader,
+		private readonly mirror: MirrorTarget,
+		private readonly ledger?: MirrorLedger,
 	) {}
 
-	async uploadBlob(data: Uint8Array, mimeType: string): Promise<{ ref: { $link: string }; mimeType: string; size: number }> {
-		const result = await this.primary.uploadBlob(data, mimeType)
-		try {
-			const mirrored = await this.mirror.uploadBlob(data, mimeType)
-			if (mirrored.ref.$link !== result.ref.$link) {
-				console.warn(`[media] Mirrored blob CID ${mirrored.ref.$link} differs from ${result.ref.$link}`)
-			}
-		} catch (err) {
-			console.warn(`[media] Failed to mirror blob ${result.ref.$link} to the catalogue repo:`, (err as Error).message)
-		}
+	async uploadBlob(data: Uint8Array, mimeType: string, options?: UploadOptions): Promise<UploadedBlob> {
+		const result = await this.primary.uploadBlob(data, mimeType, options)
+		await this.copy(data, mimeType, result.ref.$link, options?.imageId)
 		return result
+	}
+
+	needsMirror(imageId: string): boolean {
+		return !!this.ledger && !this.ledger.isBlobMirrored(imageId)
+	}
+
+	async mirrorCached(imageId: string, data: Uint8Array, mimeType: string): Promise<void> {
+		await this.copy(data, mimeType, undefined, imageId)
+	}
+
+	/** One attempt, so a rate-limited catalogue PDS never stalls the sync. */
+	private async copy(data: Uint8Array, mimeType: string, expectedCid: string | undefined, imageId: string | undefined): Promise<void> {
+		try {
+			const mirrored = await this.mirror.uploadBlobOnce(data, mimeType)
+			if (expectedCid && mirrored.ref.$link !== expectedCid) {
+				console.warn(`[media] Mirrored blob CID ${mirrored.ref.$link} differs from ${expectedCid}`)
+				return
+			}
+			if (imageId) this.ledger?.setBlobMirrored(imageId)
+		} catch (err) {
+			console.warn(`[media] Failed to mirror blob ${expectedCid ?? imageId ?? ''} to the catalogue repo:`, (err as Error).message)
+		}
 	}
 }
 
@@ -86,6 +138,16 @@ export async function uploadIGDBImage(
 	// Check cache first
 	if (state.hasBlob(imageId)) {
 		const cached = state.getBlob(imageId)!
+		// A blob cached while uploads went only to the contributor's repo may
+		// still be missing from the catalogue repo.
+		if (atproto.needsMirror?.(imageId) && atproto.mirrorCached) {
+			try {
+				const bytes = await igdb.downloadImage(imageId, size)
+				await atproto.mirrorCached(imageId, bytes, cached.mimeType)
+			} catch (err) {
+				console.warn(`[igdb] Failed to download image ${imageId} for mirroring:`, (err as Error).message)
+			}
+		}
 		return {
 			$type: 'blob',
 			ref: cached.ref,
@@ -103,7 +165,7 @@ export async function uploadIGDBImage(
 	}
 
 	try {
-		const blobResult = await atproto.uploadBlob(imageBuffer, 'image/jpeg')
+		const blobResult = await atproto.uploadBlob(imageBuffer, 'image/jpeg', { imageId })
 
 		// Cache the result
 		state.setBlob(imageId, blobResult)

@@ -28,7 +28,7 @@ import { syncEntityType, type SyncEntityConfig } from './pipeline/sync-entities.
 import { ContributionClient } from './contributions/client.js'
 import { syncNewCompanies } from './pipeline/sync-companies.js'
 import { slugify } from './helpers.js'
-import { MirroringBlobUploader } from './media.js'
+import { MirroringBlobUploader, assertCatalogueAccount } from './media.js'
 import type {
 	// IGDBPlatformFamily,
 	IGDBPlatform,
@@ -87,7 +87,8 @@ async function main() {
 
 	// Game media goes to the contributor's repo (for the contribution record)
 	// and to the catalogue repo (for when auto-accept applies it).
-	const blobUploader = new MirroringBlobUploader(contributionClient, atproto)
+	assertCatalogueAccount(atproto.getDid(), process.env.PENTARACT_DID)
+	const blobUploader = new MirroringBlobUploader(contributionClient, atproto, state)
 
 	const shutdown = () => {
 		console.log('\n[shutdown] Closing state...')
