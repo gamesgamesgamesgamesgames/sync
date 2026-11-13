@@ -2,7 +2,7 @@ import { HappyViewNodeClient } from '@happyview/oauth-client-node'
 import { FileStorage } from './storage.js'
 import { fetchWithRetry, type RetryOptions } from './retry.js'
 
-/** A HappyView request that failed. `status` is 0 when no response arrived. */
+/** A HappyView request that came back with a non-OK status. */
 export class ContributionRequestError extends Error {
 	constructor(
 		readonly operation: string,
