@@ -46,6 +46,21 @@ function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 /**
+ * Keep only the fields a contribution may carry. createContribution rejects
+ * anything else, so a newGame built from the full mapped record (with
+ * `$type`, `createdAt`, `publishedAt`) would always be refused.
+ */
+export function pickContributableFields(mapped: Record<string, unknown>): Record<string, unknown> {
+	const picked: Record<string, unknown> = {}
+	for (const field of CONTRIBUTABLE_FIELDS) {
+		if (field in mapped && mapped[field] !== undefined) {
+			picked[field] = mapped[field]
+		}
+	}
+	return picked
+}
+
+/**
  * Compare a mapped IGDB record against the current game record.
  * Returns only the contributable fields that differ.
  */
