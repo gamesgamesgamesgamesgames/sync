@@ -14,6 +14,36 @@ export interface BlobUploader {
 	uploadBlob(data: Uint8Array, mimeType: string): Promise<{ ref: { $link: string }; mimeType: string; size: number }>
 }
 
+/**
+ * Uploads each blob to the contributor's repo and also to the catalogue repo.
+ *
+ * A contribution's media references blobs in the contributor's repo, but once
+ * it is accepted the same media lands on a game in the catalogue repo, and a
+ * PDS refuses a record that references a blob it does not hold. Uploading the
+ * same bytes to both gives the same CID in both places. A failed mirror upload
+ * only logs: auto-accept then applies the rest of the contribution and leaves
+ * the game's media as it was.
+ */
+export class MirroringBlobUploader implements BlobUploader {
+	constructor(
+		private readonly primary: BlobUploader,
+		private readonly mirror: BlobUploader,
+	) {}
+
+	async uploadBlob(data: Uint8Array, mimeType: string): Promise<{ ref: { $link: string }; mimeType: string; size: number }> {
+		const result = await this.primary.uploadBlob(data, mimeType)
+		try {
+			const mirrored = await this.mirror.uploadBlob(data, mimeType)
+			if (mirrored.ref.$link !== result.ref.$link) {
+				console.warn(`[media] Mirrored blob CID ${mirrored.ref.$link} differs from ${result.ref.$link}`)
+			}
+		} catch (err) {
+			console.warn(`[media] Failed to mirror blob ${result.ref.$link} to the catalogue repo:`, (err as Error).message)
+		}
+		return result
+	}
+}
+
 /** The blob reference shape used in atproto records. */
 export interface BlobRef {
 	$type: 'blob'

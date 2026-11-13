@@ -28,6 +28,7 @@ import { syncEntityType, type SyncEntityConfig } from './pipeline/sync-entities.
 import { ContributionClient } from './contributions/client.js'
 import { syncNewCompanies } from './pipeline/sync-companies.js'
 import { slugify } from './helpers.js'
+import { MirroringBlobUploader } from './media.js'
 import type {
 	// IGDBPlatformFamily,
 	IGDBPlatform,
@@ -83,6 +84,10 @@ async function main() {
 	await contributionClient.restore(IGDB_ATPROTO_DID)
 
 	const state = new StateManager()
+
+	// Game media goes to the contributor's repo (for the contribution record)
+	// and to the catalogue repo (for when auto-accept applies it).
+	const blobUploader = new MirroringBlobUploader(contributionClient, atproto)
 
 	const shutdown = () => {
 		console.log('\n[shutdown] Closing state...')
@@ -192,7 +197,7 @@ async function main() {
 				}
 			}
 
-			return mapGame(item, igdb, atproto, state, { existingMedia, blobUploader: contributionClient })
+			return mapGame(item, igdb, atproto, state, { existingMedia, blobUploader })
 		},
 	}
 	await syncEntityType(gameConfig, igdb, atproto, state)
