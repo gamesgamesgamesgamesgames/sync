@@ -9,6 +9,7 @@
 import type { IGDBClient } from '../igdb/client.js'
 import type { AtprotoClient } from '../atproto/client.js'
 import type { StateManager, EntityType } from '../state.js'
+import { XRPCError } from '@atproto/xrpc'
 import { ContributionRequestError, type ContributionClient } from '../contributions/client.js'
 import { syncGameViaContribution } from '../contributions/handler.js'
 import { errorLabel, prefetch } from '../helpers.js'
@@ -37,6 +38,10 @@ export interface SyncEntityConfig<T extends { id: number }> {
 	happyviewApiKey?: string
 	/** When set, games are synced via the contribution path instead of direct writes. */
 	contributionClient?: ContributionClient
+	/** Consecutive failed runs before an entity stops holding the cursor (default SYNC_MAX_FAILED_RUNS or 3). */
+	maxFailedRuns?: number
+	/** Warn when the cursor is older than this many hours (default SYNC_CURSOR_ALERT_HOURS or 72). */
+	cursorAlertHours?: number
 }
 
 export interface SyncResult {
@@ -44,23 +49,60 @@ export interface SyncResult {
 	updated: number
 	skipped: number
 	failed: number
-	/** Failures a later run may get past (rate limits, auth, outages, bugs). */
+	/** Failures holding the cursor back this run. */
 	retryable: number
+	/** Entities moved to `failures` this run after too many failed runs. */
+	givenUp: number
 	/** Whether the incremental-sync cursor moved forward. */
 	cursorAdvanced: boolean
 }
 
 /**
- * Whether a failure will happen again however often it is retried: HappyView
- * refused the request itself (a 4xx other than auth, timeout or rate limit).
- * Those are recorded for review and do not hold the cursor back. Everything
- * else, including errors from our own code, holds it back so the next run
- * tries the same window again.
+ * How a failed entity affects the incremental-sync cursor.
+ *
+ * - `permanent`: HappyView refused the request itself (a 4xx other than
+ *   auth, timeout or rate limit). Recorded in `failures`; the cursor moves on.
+ * - `systemic`: auth, rate limits and network errors. They hit every entity
+ *   alike, so they always hold the cursor and never count against one entity.
+ * - `entity`: anything else, including 5xx (HappyView 2.17.5 answers every
+ *   Lua error() with 500, so a script refusing one game looks like this) and
+ *   errors from our own code. They hold the cursor for up to
+ *   SYNC_MAX_FAILED_RUNS consecutive runs, then the entity moves to
+ *   `failures` so one bad game cannot pin the cursor forever.
  */
+export type FailureKind = 'permanent' | 'systemic' | 'entity'
+
+const SYSTEMIC_STATUSES = [401, 403, 408, 429]
+
+export function classifyFailure(err: unknown): FailureKind {
+	if (err instanceof ContributionRequestError || err instanceof XRPCError) {
+		const status = err.status
+		if (SYSTEMIC_STATUSES.includes(status)) return 'systemic'
+		if (status >= 400 && status < 500) return 'permanent'
+		return 'entity'
+	}
+	// fetch() reports connection failures as a TypeError("fetch failed").
+	if (err instanceof TypeError && /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|socket/i.test(err.message)) {
+		return 'systemic'
+	}
+	return 'entity'
+}
+
+/** Kept for callers that only need the yes/no answer. */
 export function isPermanentFailure(err: unknown): boolean {
-	if (!(err instanceof ContributionRequestError)) return false
-	const { status } = err
-	return status >= 400 && status < 500 && ![401, 403, 408, 429].includes(status)
+	return classifyFailure(err) === 'permanent'
+}
+
+/** A mapRecord failure, carrying the key of the entity it was mapping. */
+class KeyedFailure extends Error {
+	constructor(readonly key: string, readonly cause: unknown) {
+		super((cause as Error)?.message ?? String(cause))
+	}
+}
+
+function envNumber(name: string, fallback: number): number {
+	const value = Number(process.env[name])
+	return Number.isFinite(value) && value > 0 ? value : fallback
 }
 
 /** Deep-compare two records, ignoring the `$type` field added by the PDS. */
@@ -122,7 +164,37 @@ export async function syncEntityType<T extends { id: number }>(
 		console.log(`[sync] ${entityType}: full scan (no previous sync timestamp)`)
 	}
 
-	const result: SyncResult = { created: 0, updated: 0, skipped: 0, failed: 0, retryable: 0, cursorAdvanced: false }
+	const result: SyncResult = { created: 0, updated: 0, skipped: 0, failed: 0, retryable: 0, givenUp: 0, cursorAdvanced: false }
+	const maxFailedRuns = config.maxFailedRuns ?? envNumber('SYNC_MAX_FAILED_RUNS', 3)
+	const cursorAlertHours = config.cursorAlertHours ?? envNumber('SYNC_CURSOR_ALERT_HOURS', 72)
+
+	if (lastSyncAt) {
+		const ageHours = (syncStartedAt - lastSyncAt) / 3600
+		if (ageHours > cursorAlertHours) {
+			console.warn(`[sync] [ALERT] ${entityType}: the cursor is ${Math.round(ageHours)}h old (limit ${cursorAlertHours}h). Something has held it back for several runs; check the retryable failures below.`)
+		}
+	}
+
+	/** Record a failure and decide whether it holds the cursor back. */
+	const recordFailure = (key: string | undefined, err: unknown) => {
+		result.failed++
+		const kind = classifyFailure(err)
+		if (kind === 'permanent') {
+			if (key) state.addFailure(entityType, key)
+			return
+		}
+		if (kind === 'entity' && key) {
+			const runs = state.recordFailedRun(entityType, key, syncStartedAt, (err as Error)?.message ?? String(err))
+			if (runs >= maxFailedRuns) {
+				console.warn(`  [!] ${entityType} ${key} has failed ${runs} runs in a row; moving it to failures so it stops holding the cursor`)
+				state.addFailure(entityType, key)
+				state.clearFailureStreak(entityType, key)
+				result.givenUp++
+				return
+			}
+		}
+		result.retryable++
+	}
 	const pool = new ConcurrencyPool(concurrency)
 	let totalProcessed = 0
 
@@ -138,9 +210,10 @@ export async function syncEntityType<T extends { id: number }>(
 		const updateBatch: Array<{ key: string; rkey: string; record: Record<string, unknown>; name: string; slug?: string }> = []
 
 		const mapped = await Promise.allSettled(
-			items.map((item) =>
-				pool.run(async () => {
-					const key = getKey(item)
+			items.map((item) => {
+				const itemKey = getKey(item)
+				return pool.run(async () => {
+					const key = itemKey
 					const existingUri = state.getEntity(entityType, key)
 					totalProcessed++
 					if (totalProcessed % 50 === 0) {
@@ -156,15 +229,18 @@ export async function syncEntityType<T extends { id: number }>(
 
 					const record = await config.mapRecord(item)
 					return { key, record, existingUri, name: (record.name as string) ?? key, slug }
-				}),
-			),
+				}).catch((err) => {
+					throw new KeyedFailure(itemKey, err)
+				})
+			}),
 		)
 
 		for (const entry of mapped) {
 			if (entry.status === 'rejected') {
-				console.error(`  [!] ${errorLabel(entry.reason)} ${entityType} sync failed:`, (entry.reason as Error).message)
-				result.failed++
-				result.retryable++
+				const reason = entry.reason instanceof KeyedFailure ? entry.reason.cause : entry.reason
+				const failedKey = entry.reason instanceof KeyedFailure ? entry.reason.key : undefined
+				console.error(`  [!] ${errorLabel(reason)} ${entityType} sync failed:`, (reason as Error)?.message)
+				recordFailure(failedKey, reason)
 				continue
 			}
 
@@ -175,6 +251,7 @@ export async function syncEntityType<T extends { id: number }>(
 				try {
 					const syncResult = await syncGameViaContribution(key, record, config.contributionClient)
 
+					state.clearFailureStreak(entityType, key)
 					if (syncResult.action === 'created') {
 						console.log(`  [contributions] ${syncResult.contributionType}: ${name} (${syncResult.uri})`)
 						result.created++
@@ -183,12 +260,7 @@ export async function syncEntityType<T extends { id: number }>(
 					}
 				} catch (err) {
 					console.error(`  [!] Contribution failed for ${name}:`, (err as Error).message)
-					result.failed++
-					if (isPermanentFailure(err)) {
-						state.addFailure(entityType, key)
-					} else {
-						result.retryable++
-					}
+					recordFailure(key, err)
 				}
 				continue
 			}
@@ -232,6 +304,7 @@ export async function syncEntityType<T extends { id: number }>(
 					const res = results[j]
 					if (res) {
 						state.setEntity(entityType, entry.key, res.uri)
+						state.clearFailureStreak(entityType, entry.key)
 						console.log(`  [sync] Updated: ${entry.name} (${res.uri})`)
 						const steamId = (entry.record.externalIds as Record<string, unknown> | undefined)?.steam as string | undefined
 						if (steamId) {
@@ -253,6 +326,7 @@ export async function syncEntityType<T extends { id: number }>(
 					try {
 						const { uri } = await atproto.putRecord(collection, entry.rkey, entry.record)
 						state.setEntity(entityType, entry.key, uri)
+						state.clearFailureStreak(entityType, entry.key)
 						result.updated++
 						console.log(`  [sync] Updated: ${entry.name} (${uri})`)
 						const steamId = (entry.record.externalIds as Record<string, unknown> | undefined)?.steam as string | undefined
@@ -268,8 +342,7 @@ export async function syncEntityType<T extends { id: number }>(
 						}
 					} catch (putErr) {
 						console.error(`  [!] ${errorLabel(putErr)} Update failed: ${entry.name}:`, (putErr as Error).message)
-						result.failed++
-						result.retryable++
+						recordFailure(entry.key, putErr)
 					}
 				}
 			}
@@ -322,6 +395,6 @@ export async function syncEntityType<T extends { id: number }>(
 	} else {
 		console.warn(`[sync] ${entityType}: ${result.retryable} retryable failure(s); keeping the cursor at ${lastSyncAt ? new Date(lastSyncAt * 1000).toISOString() : 'none'} so the next run retries them`)
 	}
-	console.log(`[sync] ${entityType}: done (created=${result.created}, updated=${result.updated}, skipped=${result.skipped}, failed=${result.failed}, retryable=${result.retryable})`)
+	console.log(`[sync] ${entityType}: done (created=${result.created}, updated=${result.updated}, skipped=${result.skipped}, failed=${result.failed}, retryable=${result.retryable}, givenUp=${result.givenUp})`)
 	return result
 }

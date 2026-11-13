@@ -101,6 +101,24 @@ export class StateManager {
 				PRIMARY KEY (type, igdb_id)
 			);
 
+			-- Consecutive runs in which an entity failed in a way a rerun might
+			-- fix. After enough of them the entity moves to failures and stops
+			-- holding the sync cursor back.
+			CREATE TABLE IF NOT EXISTS failure_streaks (
+				type TEXT NOT NULL,
+				igdb_id TEXT NOT NULL,
+				runs INTEGER NOT NULL,
+				last_run_at INTEGER NOT NULL,
+				last_error TEXT,
+				PRIMARY KEY (type, igdb_id)
+			);
+
+			-- Cached blobs known to be in the catalogue repo as well as the
+			-- contributor's.
+			CREATE TABLE IF NOT EXISTS blob_mirrors (
+				image_id TEXT PRIMARY KEY
+			);
+
 			CREATE TABLE IF NOT EXISTS steam_map (
 				igdb_id TEXT PRIMARY KEY,
 				steam_id TEXT NOT NULL,
@@ -255,6 +273,47 @@ export class StateManager {
 		}
 		const row = this.db.prepare('SELECT COUNT(*) as count FROM failures').get() as { count: number }
 		return row.count
+	}
+
+	/**
+	 * Count a failed run for an entity and return how many consecutive runs it
+	 * has now failed in. Several failures within one run (`runAt`) count once.
+	 */
+	recordFailedRun(type: EntityType, igdbId: number | string, runAt: number, error: string): number {
+		const id = String(igdbId)
+		const row = this.db
+			.prepare('SELECT runs, last_run_at FROM failure_streaks WHERE type = ? AND igdb_id = ?')
+			.get(type, id) as { runs: number; last_run_at: number } | undefined
+		const runs = !row ? 1 : row.last_run_at === runAt ? row.runs : row.runs + 1
+		this.db
+			.prepare('INSERT OR REPLACE INTO failure_streaks (type, igdb_id, runs, last_run_at, last_error) VALUES (?, ?, ?, ?, ?)')
+			.run(type, id, runs, runAt, error.slice(0, 500))
+		return runs
+	}
+
+	/** Forget an entity's failure streak after it succeeds. */
+	clearFailureStreak(type: EntityType, igdbId: number | string): void {
+		this.db
+			.prepare('DELETE FROM failure_streaks WHERE type = ? AND igdb_id = ?')
+			.run(type, String(igdbId))
+	}
+
+	/** How many consecutive runs an entity has failed in (0 if none). */
+	getFailureStreak(type: EntityType, igdbId: number | string): number {
+		const row = this.db
+			.prepare('SELECT runs FROM failure_streaks WHERE type = ? AND igdb_id = ?')
+			.get(type, String(igdbId)) as { runs: number } | undefined
+		return row?.runs ?? 0
+	}
+
+	/** Whether a cached blob is known to be in the catalogue repo too. */
+	isBlobMirrored(imageId: string): boolean {
+		return !!this.db.prepare('SELECT 1 FROM blob_mirrors WHERE image_id = ?').get(imageId)
+	}
+
+	/** Record that a cached blob is in the catalogue repo too. */
+	setBlobMirrored(imageId: string): void {
+		this.db.prepare('INSERT OR IGNORE INTO blob_mirrors (image_id) VALUES (?)').run(imageId)
 	}
 
 	/** Remove a failure entry after a successful retry. */
