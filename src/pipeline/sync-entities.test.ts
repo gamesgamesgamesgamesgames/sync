@@ -6,7 +6,7 @@ import { StateManager } from '../state.js'
 import { ContributionRequestError, type ContributionClient } from '../contributions/client.js'
 import type { IGDBClient } from '../igdb/client.js'
 import type { AtprotoClient } from '../atproto/client.js'
-import { classifyFailure, isPermanentFailure, syncEntityType } from './sync-entities.js'
+import { classifyFailure, isPermanentFailure, needsAttention, syncEntityType } from './sync-entities.js'
 
 const PREVIOUS_CURSOR = 1_781_308_800 // 2026-06-13
 
@@ -49,7 +49,7 @@ describe('syncEntityType cursor', () => {
 		}
 	})
 
-	function run(client: ContributionClient, ids = [1, 2, 3], extra: Partial<Parameters<typeof syncEntityType>[0]> = {}) {
+	function run(client: ContributionClient, ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], extra: Partial<Parameters<typeof syncEntityType>[0]> = {}) {
 		return syncEntityType<{ id: number }>({
 			entityType: 'game',
 			igdbEndpoint: 'games',
@@ -106,7 +106,7 @@ describe('syncEntityType cursor', () => {
 	})
 
 	test('a mapRecord rejection holds the cursor and counts against that game', async () => {
-		const r = await run(ok(), [1, 2], {
+		const r = await run(ok(), undefined, {
 			mapRecord: async (item: { id: number }) => {
 				if (item.id === 2) throw new Error('IGDB image download exploded')
 				return { name: `Game ${item.id}`, applicationType: 'game' }
@@ -137,6 +137,67 @@ describe('syncEntityType cursor', () => {
 		expect(state.getLastSyncAt('platform')).toBe(PREVIOUS_CURSOR)
 	})
 
+	test('more than 20% of games failing per-game trips the breaker: no streaks move', async () => {
+		const lua500 = () => new ContributionRequestError('createContribution', 500, 'script error')
+		const client = contributionClient(async (params) => {
+			const n = Number((params as { changes: { name: string } }).changes.name.split(' ')[1])
+			if (n <= 3) throw lua500()
+			return { uri: 'at://x/c/1' }
+		})
+		for (let run_ = 1; run_ <= 4; run_++) {
+			vi.spyOn(Date, 'now').mockReturnValue((PREVIOUS_CURSOR + run_ * 86400) * 1000)
+			const r = await run(client)
+			expect(r.systemic).toBe(1)
+			expect(r.givenUp).toBe(0)
+			expect(r.cursorAdvanced).toBe(false)
+		}
+		expect(state.getFailureStreak('game', '1')).toBe(0)
+		expect(state.getFailures('game')).toEqual([])
+	})
+
+	test('a 502 from HappyView is systemic and counts against no game', async () => {
+		const gateway = () => new ContributionRequestError('getGame', 502, 'Bad Gateway')
+		for (let run_ = 1; run_ <= 4; run_++) {
+			vi.spyOn(Date, 'now').mockReturnValue((PREVIOUS_CURSOR + run_ * 86400) * 1000)
+			const r = await run(failGame(2, gateway))
+			expect(r.systemic).toBe(1)
+			expect(needsAttention(r)).toBe(true)
+			expect(r.cursorAdvanced).toBe(false)
+		}
+		expect(state.getFailureStreak('game', '2')).toBe(0)
+	})
+
+	test('the first 401 from createContribution stops the run', async () => {
+		const client = contributionClient(async () => {
+			throw new ContributionRequestError('createContribution', 401, 'no DPoP key matching proof thumbprint')
+		})
+		const r = await run(client)
+		expect(r.aborted).toMatch(/refused the sync account/)
+		expect(client.createContribution).toHaveBeenCalledTimes(1)
+		expect(r.cursorAdvanced).toBe(false)
+		expect(needsAttention(r)).toBe(true)
+	})
+
+	test('a 403 from createContribution also stops the run', async () => {
+		const client = contributionClient(async () => {
+			throw new ContributionRequestError('createContribution', 403, 'forbidden')
+		})
+		const r = await run(client)
+		expect(r.aborted).toBeDefined()
+		expect(client.createContribution).toHaveBeenCalledTimes(1)
+	})
+
+	test('a clean run needs no attention; a stale cursor does', async () => {
+		vi.spyOn(Date, 'now').mockReturnValue((PREVIOUS_CURSOR + 86400) * 1000)
+		const clean = await run(ok())
+		expect(needsAttention(clean)).toBe(false)
+		state.setLastSyncAt('game', PREVIOUS_CURSOR)
+		vi.spyOn(Date, 'now').mockReturnValue((PREVIOUS_CURSOR + 4 * 86400) * 1000)
+		const stale = await run(ok())
+		expect(stale.cursorAlert).toBe(true)
+		expect(needsAttention(stale)).toBe(true)
+	})
+
 	test('warns when the cursor is older than the alert threshold', async () => {
 		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
 		vi.spyOn(Date, 'now').mockReturnValue((PREVIOUS_CURSOR + 4 * 86400) * 1000)
@@ -147,7 +208,7 @@ describe('syncEntityType cursor', () => {
 	test('advances the cursor when every game succeeds', async () => {
 		const result = await run(contributionClient(async () => ({ uri: 'at://x/c/1' })))
 
-		expect(result.created).toBe(3)
+		expect(result.created).toBe(10)
 		expect(result.cursorAdvanced).toBe(true)
 		expect(state.getLastSyncAt('game')).toBeGreaterThan(PREVIOUS_CURSOR)
 	})
@@ -216,7 +277,9 @@ describe('classifyFailure', () => {
 		[408, 'systemic'],
 		[429, 'systemic'],
 		[500, 'entity'],
-		[502, 'entity'],
+		[502, 'systemic'],
+		[503, 'systemic'],
+		[504, 'systemic'],
 	])('status %i → %s', (status, kind) => {
 		expect(classifyFailure(new ContributionRequestError('x', status, ''))).toBe(kind)
 	})

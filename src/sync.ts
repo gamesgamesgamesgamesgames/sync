@@ -24,7 +24,7 @@ import {
 	mapFranchise,
 	mapGame,
 } from './atproto/mapping.js'
-import { syncEntityType, type SyncEntityConfig } from './pipeline/sync-entities.js'
+import { needsAttention, syncEntityType, type SyncEntityConfig, type SyncResult } from './pipeline/sync-entities.js'
 import { ContributionClient } from './contributions/client.js'
 import { syncNewCompanies } from './pipeline/sync-companies.js'
 import { slugify } from './helpers.js'
@@ -85,6 +85,15 @@ async function main() {
 
 	const state = new StateManager()
 
+	// Runs that need a human end with a non-zero exit, so systemd OnFailure
+	// can alert on them.
+	const attention: string[] = []
+	const track = (name: string, result: SyncResult) => {
+		if (needsAttention(result)) {
+			attention.push(`${name}: ${result.aborted ?? (result.cursorAlert ? 'cursor is stale' : `${result.systemic} systemic failure(s)`)}`)
+		}
+	}
+
 	// Game media goes to the contributor's repo (for the contribution record)
 	// and to the catalogue repo (for when auto-accept applies it).
 	assertCatalogueAccount(atproto.getDid(), process.env.PENTARACT_DID)
@@ -130,7 +139,7 @@ async function main() {
 		collection: 'games.gamesgamesgamesgames.platform',
 		mapRecord: async (item) => mapPlatform(item, igdb, atproto, state),
 	}
-	await syncEntityType(platformConfig, igdb, atproto, state)
+	track('platform', await syncEntityType(platformConfig, igdb, atproto, state))
 
 	// // 3. Engines
 	// const engineConfig: SyncEntityConfig<IGDBGameEngine> = {
@@ -201,7 +210,7 @@ async function main() {
 			return mapGame(item, igdb, atproto, state, { existingMedia, blobUploader })
 		},
 	}
-	await syncEntityType(gameConfig, igdb, atproto, state)
+	track('game', await syncEntityType(gameConfig, igdb, atproto, state))
 
 	// 5. Collections (IGDB collections → type: "series") — after games so game URIs are available
 	const collectionConfig: SyncEntityConfig<IGDBCollection> = {
@@ -212,7 +221,7 @@ async function main() {
 		getStateKey: (item) => `c_${item.id}`,
 		mapRecord: async (item) => mapCollection(item, state),
 	}
-	await syncEntityType(collectionConfig, igdb, atproto, state)
+	track('collection', await syncEntityType(collectionConfig, igdb, atproto, state))
 
 	// 6. Franchises (IGDB franchises → type: "franchise")
 	const franchiseConfig: SyncEntityConfig<IGDBFranchise> = {
@@ -223,7 +232,7 @@ async function main() {
 		getStateKey: (item) => `f_${item.id}`,
 		mapRecord: async (item) => mapFranchise(item, state),
 	}
-	await syncEntityType(franchiseConfig, igdb, atproto, state)
+	track('franchise', await syncEntityType(franchiseConfig, igdb, atproto, state))
 
 	// 7. Sync new companies — create org profiles for any companies
 	//    encountered in game updates that don't have profiles yet.
@@ -235,6 +244,11 @@ async function main() {
 	console.log(`Finished at ${new Date().toISOString()}`)
 
 	state.close()
+
+	if (attention.length > 0) {
+		console.error(`[sync] [ALERT] This run needs attention: ${attention.join('; ')}`)
+		process.exitCode = 1
+	}
 }
 
 main().catch((err) => {

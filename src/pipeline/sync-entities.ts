@@ -42,6 +42,8 @@ export interface SyncEntityConfig<T extends { id: number }> {
 	maxFailedRuns?: number
 	/** Warn when the cursor is older than this many hours (default SYNC_CURSOR_ALERT_HOURS or 72). */
 	cursorAlertHours?: number
+	/** Share of entities failing per-entity above which the run counts as systemic (default SYNC_ENTITY_FAILURE_RATIO or 0.2). */
+	entityFailureRatio?: number
 }
 
 export interface SyncResult {
@@ -55,6 +57,17 @@ export interface SyncResult {
 	givenUp: number
 	/** Whether the incremental-sync cursor moved forward. */
 	cursorAdvanced: boolean
+	/** Failures that hit everything alike (auth, rate limits, outages), plus a tripped circuit breaker. */
+	systemic: number
+	/** The cursor-age alert fired at the start of this run. */
+	cursorAlert: boolean
+	/** Why the run stopped early, if it did. */
+	aborted?: string
+}
+
+/** True when a run needs a human: exit non-zero so systemd OnFailure alerts. */
+export function needsAttention(result: SyncResult): boolean {
+	return result.cursorAlert || result.systemic > 0 || !!result.aborted
 }
 
 /**
@@ -62,17 +75,20 @@ export interface SyncResult {
  *
  * - `permanent`: HappyView refused the request itself (a 4xx other than
  *   auth, timeout or rate limit). Recorded in `failures`; the cursor moves on.
- * - `systemic`: auth, rate limits and network errors. They hit every entity
- *   alike, so they always hold the cursor and never count against one entity.
- * - `entity`: anything else, including 5xx (HappyView 2.17.5 answers every
- *   Lua error() with 500, so a script refusing one game looks like this) and
- *   errors from our own code. They hold the cursor for up to
+ * - `systemic`: auth, rate limits, gateway errors (502/503/504) and network
+ *   errors. They hit every entity alike, so they always hold the cursor and
+ *   never count against one entity.
+ * - `entity`: anything else, including a plain 500 (HappyView 2.17.5 answers
+ *   every Lua error() with 500, so a script refusing one game looks like
+ *   this) and errors from our own code. They hold the cursor for up to
  *   SYNC_MAX_FAILED_RUNS consecutive runs, then the entity moves to
- *   `failures` so one bad game cannot pin the cursor forever.
+ *   `failures` so one bad game cannot pin the cursor forever. If more than
+ *   SYNC_ENTITY_FAILURE_RATIO of a run's entities fail this way, the run as a
+ *   whole is treated as systemic (a bad deploy, say) and no streak moves.
  */
 export type FailureKind = 'permanent' | 'systemic' | 'entity'
 
-const SYSTEMIC_STATUSES = [401, 403, 408, 429]
+const SYSTEMIC_STATUSES = [401, 403, 408, 429, 502, 503, 504]
 
 export function classifyFailure(err: unknown): FailureKind {
 	if (err instanceof ContributionRequestError || err instanceof XRPCError) {
@@ -98,6 +114,16 @@ class KeyedFailure extends Error {
 	constructor(readonly key: string, readonly cause: unknown) {
 		super((cause as Error)?.message ?? String(cause))
 	}
+}
+
+/** Raised to stop a run that cannot succeed (the sync account's auth is refused). */
+class StopRun extends Error {}
+
+/** createContribution refusing the sync account's auth means every game will fail the same way. */
+function isAuthRefusal(err: unknown): boolean {
+	return err instanceof ContributionRequestError
+		&& err.operation === 'createContribution'
+		&& (err.status === 401 || err.status === 403)
 }
 
 function envNumber(name: string, fallback: number): number {
@@ -164,18 +190,25 @@ export async function syncEntityType<T extends { id: number }>(
 		console.log(`[sync] ${entityType}: full scan (no previous sync timestamp)`)
 	}
 
-	const result: SyncResult = { created: 0, updated: 0, skipped: 0, failed: 0, retryable: 0, givenUp: 0, cursorAdvanced: false }
+	const result: SyncResult = { created: 0, updated: 0, skipped: 0, failed: 0, retryable: 0, givenUp: 0, cursorAdvanced: false, systemic: 0, cursorAlert: false }
 	const maxFailedRuns = config.maxFailedRuns ?? envNumber('SYNC_MAX_FAILED_RUNS', 3)
 	const cursorAlertHours = config.cursorAlertHours ?? envNumber('SYNC_CURSOR_ALERT_HOURS', 72)
+	const entityFailureRatio = config.entityFailureRatio ?? envNumber('SYNC_ENTITY_FAILURE_RATIO', 0.2)
+	const entityFailures: Array<{ key: string; message: string }> = []
 
 	if (lastSyncAt) {
 		const ageHours = (syncStartedAt - lastSyncAt) / 3600
 		if (ageHours > cursorAlertHours) {
+			result.cursorAlert = true
 			console.warn(`[sync] [ALERT] ${entityType}: the cursor is ${Math.round(ageHours)}h old (limit ${cursorAlertHours}h). Something has held it back for several runs; check the retryable failures below.`)
 		}
 	}
 
-	/** Record a failure and decide whether it holds the cursor back. */
+	/**
+	 * Record a failure. Every non-permanent failure holds the cursor for now.
+	 * Per-entity failures are only charged to their entity's streak at the end
+	 * of the run, once the circuit breaker has had its say.
+	 */
 	const recordFailure = (key: string | undefined, err: unknown) => {
 		result.failed++
 		const kind = classifyFailure(err)
@@ -183,18 +216,17 @@ export async function syncEntityType<T extends { id: number }>(
 			if (key) state.addFailure(entityType, key)
 			return
 		}
-		if (kind === 'entity' && key) {
-			const runs = state.recordFailedRun(entityType, key, syncStartedAt, (err as Error)?.message ?? String(err))
-			if (runs >= maxFailedRuns) {
-				console.warn(`  [!] ${entityType} ${key} has failed ${runs} runs in a row; moving it to failures so it stops holding the cursor`)
-				state.addFailure(entityType, key)
-				state.clearFailureStreak(entityType, key)
-				result.givenUp++
-				return
-			}
-		}
 		result.retryable++
+		if (kind === 'systemic') {
+			result.systemic++
+		} else if (key) {
+			entityFailures.push({ key, message: (err as Error)?.message ?? String(err) })
+		}
+		if (isAuthRefusal(err)) {
+			throw new StopRun(`createContribution refused the sync account (${(err as ContributionRequestError).status}); stopping instead of failing every game the same way`)
+		}
 	}
+
 	const pool = new ConcurrencyPool(concurrency)
 	let totalProcessed = 0
 
@@ -202,199 +234,225 @@ export async function syncEntityType<T extends { id: number }>(
 		console.log(`[sync] ${entityType}: starting at offset ${startOffset}`)
 	}
 
-	for await (const { items, offset } of prefetch(igdb.paginate<T>(igdbEndpoint, igdbFields, startOffset, where))) {
-		const batchStart = Date.now()
-		console.log(`  [sync] ${entityType}: got ${items.length} items at offset ${offset}`)
+	try {
+		for await (const { items, offset } of prefetch(igdb.paginate<T>(igdbEndpoint, igdbFields, startOffset, where))) {
+			const batchStart = Date.now()
+			console.log(`  [sync] ${entityType}: got ${items.length} items at offset ${offset}`)
 
-		const createBatch: PendingRecord[] = []
-		const updateBatch: Array<{ key: string; rkey: string; record: Record<string, unknown>; name: string; slug?: string }> = []
+			const createBatch: PendingRecord[] = []
+			const updateBatch: Array<{ key: string; rkey: string; record: Record<string, unknown>; name: string; slug?: string }> = []
 
-		const mapped = await Promise.allSettled(
-			items.map((item) => {
-				const itemKey = getKey(item)
-				return pool.run(async () => {
-					const key = itemKey
-					const existingUri = state.getEntity(entityType, key)
-					totalProcessed++
-					if (totalProcessed % 50 === 0) {
-						console.log(`  [sync] ${entityType}: processed ${totalProcessed} (current: ${key})`)
-					}
+			const mapped = await Promise.allSettled(
+				items.map((item) => {
+					const itemKey = getKey(item)
+					return pool.run(async () => {
+						const key = itemKey
+						const existingUri = state.getEntity(entityType, key)
+						totalProcessed++
+						if (totalProcessed % 50 === 0) {
+							console.log(`  [sync] ${entityType}: processed ${totalProcessed} (current: ${key})`)
+						}
 
-					const slug = config.getSlug?.(item)
+						const slug = config.getSlug?.(item)
 
-					// Full scan: skip mapRecord entirely for existing records
-					if (!lastSyncAt && existingUri) {
-						return { key, record: null, existingUri, name: key, slug }
-					}
+						// Full scan: skip mapRecord entirely for existing records
+						if (!lastSyncAt && existingUri) {
+							return { key, record: null, existingUri, name: key, slug }
+						}
 
-					const record = await config.mapRecord(item)
-					return { key, record, existingUri, name: (record.name as string) ?? key, slug }
-				}).catch((err) => {
-					throw new KeyedFailure(itemKey, err)
-				})
-			}),
-		)
+						const record = await config.mapRecord(item)
+						return { key, record, existingUri, name: (record.name as string) ?? key, slug }
+					}).catch((err) => {
+						throw new KeyedFailure(itemKey, err)
+					})
+				}),
+			)
 
-		for (const entry of mapped) {
-			if (entry.status === 'rejected') {
-				const reason = entry.reason instanceof KeyedFailure ? entry.reason.cause : entry.reason
-				const failedKey = entry.reason instanceof KeyedFailure ? entry.reason.key : undefined
-				console.error(`  [!] ${errorLabel(reason)} ${entityType} sync failed:`, (reason as Error)?.message)
-				recordFailure(failedKey, reason)
-				continue
-			}
-
-			const { key, record, existingUri, name, slug } = entry.value
-
-			// Contribution path: all games go through contributions
-			if (config.contributionClient && record) {
-				try {
-					const syncResult = await syncGameViaContribution(key, record, config.contributionClient)
-
-					state.clearFailureStreak(entityType, key)
-					if (syncResult.action === 'created') {
-						console.log(`  [contributions] ${syncResult.contributionType}: ${name} (${syncResult.uri})`)
-						result.created++
-					} else {
-						result.skipped++
-					}
-				} catch (err) {
-					console.error(`  [!] Contribution failed for ${name}:`, (err as Error).message)
-					recordFailure(key, err)
-				}
-				continue
-			}
-
-			// Direct write path (non-game entities) — existing logic unchanged
-			if (existingUri) {
-				if (!lastSyncAt || !record) {
-					result.skipped++
+			for (const entry of mapped) {
+				if (entry.status === 'rejected') {
+					const reason = entry.reason instanceof KeyedFailure ? entry.reason.cause : entry.reason
+					const failedKey = entry.reason instanceof KeyedFailure ? entry.reason.key : undefined
+					console.error(`  [!] ${errorLabel(reason)} ${entityType} sync failed:`, (reason as Error)?.message)
+					recordFailure(failedKey, reason)
 					continue
 				}
 
-				const rkey = existingUri.split('/').pop()!
-				const existing = await atproto.getRecord(collection, rkey)
-				if (existing && recordsEqual(existing, record, collection)) {
-					result.skipped++
-					continue
-				}
+				const { key, record, existingUri, name, slug } = entry.value
 
-				updateBatch.push({ key, rkey, record, name, slug })
-			} else {
-				createBatch.push({
-					id: key,
-					entityType,
-					record: record!,
-					collection,
-					name: `${entityType}: ${name}`,
-					slug,
-				})
-			}
-		}
-
-		// Flush updates
-		for (let i = 0; i < updateBatch.length; i += updateBatchSize) {
-			const chunk = updateBatch.slice(i, i + updateBatchSize)
-			try {
-				const results = await atproto.applyUpdates(
-					chunk.map((u) => ({ collection, rkey: u.rkey, record: u.record })),
-				)
-				for (let j = 0; j < chunk.length; j++) {
-					const entry = chunk[j]!
-					const res = results[j]
-					if (res) {
-						state.setEntity(entityType, entry.key, res.uri)
-						state.clearFailureStreak(entityType, entry.key)
-						console.log(`  [sync] Updated: ${entry.name} (${res.uri})`)
-						const steamId = (entry.record.externalIds as Record<string, unknown> | undefined)?.steam as string | undefined
-						if (steamId) {
-							state.setSteamMapping(entry.key, steamId, res.uri)
-						}
-						if (entry.slug && config.happyviewUrl && config.happyviewApiKey) {
-							try {
-								await putSlugViaXrpc(config.happyviewUrl, config.happyviewApiKey!, res.uri, entry.slug)
-							} catch (err) {
-								console.error(`  [!] Slug insert failed for ${entry.name}:`, (err as Error).message)
-							}
-						}
-					}
-				}
-				result.updated += chunk.length
-			} catch (err) {
-				console.warn(`  [!] Update batch of ${chunk.length} rejected (${(err as Error).message}), falling back to individual puts`)
-				for (const entry of chunk) {
+				// Contribution path: all games go through contributions
+				if (config.contributionClient && record) {
 					try {
-						const { uri } = await atproto.putRecord(collection, entry.rkey, entry.record)
-						state.setEntity(entityType, entry.key, uri)
-						state.clearFailureStreak(entityType, entry.key)
-						result.updated++
-						console.log(`  [sync] Updated: ${entry.name} (${uri})`)
-						const steamId = (entry.record.externalIds as Record<string, unknown> | undefined)?.steam as string | undefined
-						if (steamId) {
-							state.setSteamMapping(entry.key, steamId, uri)
+						const syncResult = await syncGameViaContribution(key, record, config.contributionClient)
+
+						state.clearFailureStreak(entityType, key)
+						if (syncResult.action === 'created') {
+							console.log(`  [contributions] ${syncResult.contributionType}: ${name} (${syncResult.uri})`)
+							result.created++
+						} else {
+							result.skipped++
 						}
-						if (entry.slug && config.happyviewUrl && config.happyviewApiKey) {
-							try {
-								await putSlugViaXrpc(config.happyviewUrl, config.happyviewApiKey!, uri, entry.slug)
-							} catch (err) {
-								console.error(`  [!] Slug insert failed for ${entry.name}:`, (err as Error).message)
+					} catch (err) {
+						console.error(`  [!] Contribution failed for ${name}:`, (err as Error).message)
+						recordFailure(key, err)
+					}
+					continue
+				}
+
+				// Direct write path (non-game entities) — existing logic unchanged
+				if (existingUri) {
+					if (!lastSyncAt || !record) {
+						result.skipped++
+						continue
+					}
+
+					const rkey = existingUri.split('/').pop()!
+					const existing = await atproto.getRecord(collection, rkey)
+					if (existing && recordsEqual(existing, record, collection)) {
+						result.skipped++
+						continue
+					}
+
+					updateBatch.push({ key, rkey, record, name, slug })
+				} else {
+					createBatch.push({
+						id: key,
+						entityType,
+						record: record!,
+						collection,
+						name: `${entityType}: ${name}`,
+						slug,
+					})
+				}
+			}
+
+			// Flush updates
+			for (let i = 0; i < updateBatch.length; i += updateBatchSize) {
+				const chunk = updateBatch.slice(i, i + updateBatchSize)
+				try {
+					const results = await atproto.applyUpdates(
+						chunk.map((u) => ({ collection, rkey: u.rkey, record: u.record })),
+					)
+					for (let j = 0; j < chunk.length; j++) {
+						const entry = chunk[j]!
+						const res = results[j]
+						if (res) {
+							state.setEntity(entityType, entry.key, res.uri)
+							state.clearFailureStreak(entityType, entry.key)
+							console.log(`  [sync] Updated: ${entry.name} (${res.uri})`)
+							const steamId = (entry.record.externalIds as Record<string, unknown> | undefined)?.steam as string | undefined
+							if (steamId) {
+								state.setSteamMapping(entry.key, steamId, res.uri)
+							}
+							if (entry.slug && config.happyviewUrl && config.happyviewApiKey) {
+								try {
+									await putSlugViaXrpc(config.happyviewUrl, config.happyviewApiKey!, res.uri, entry.slug)
+								} catch (err) {
+									console.error(`  [!] Slug insert failed for ${entry.name}:`, (err as Error).message)
+								}
 							}
 						}
-					} catch (putErr) {
-						console.error(`  [!] ${errorLabel(putErr)} Update failed: ${entry.name}:`, (putErr as Error).message)
-						recordFailure(entry.key, putErr)
+					}
+					result.updated += chunk.length
+				} catch (err) {
+					console.warn(`  [!] Update batch of ${chunk.length} rejected (${(err as Error).message}), falling back to individual puts`)
+					for (const entry of chunk) {
+						try {
+							const { uri } = await atproto.putRecord(collection, entry.rkey, entry.record)
+							state.setEntity(entityType, entry.key, uri)
+							state.clearFailureStreak(entityType, entry.key)
+							result.updated++
+							console.log(`  [sync] Updated: ${entry.name} (${uri})`)
+							const steamId = (entry.record.externalIds as Record<string, unknown> | undefined)?.steam as string | undefined
+							if (steamId) {
+								state.setSteamMapping(entry.key, steamId, uri)
+							}
+							if (entry.slug && config.happyviewUrl && config.happyviewApiKey) {
+								try {
+									await putSlugViaXrpc(config.happyviewUrl, config.happyviewApiKey!, uri, entry.slug)
+								} catch (err) {
+									console.error(`  [!] Slug insert failed for ${entry.name}:`, (err as Error).message)
+								}
+							}
+						} catch (putErr) {
+							console.error(`  [!] ${errorLabel(putErr)} Update failed: ${entry.name}:`, (putErr as Error).message)
+							recordFailure(entry.key, putErr)
+						}
 					}
 				}
 			}
-		}
 
-		// Flush creates
-		if (createBatch.length > 0) {
-			for (let i = 0; i < createBatch.length; i += 20) {
-				const chunk = createBatch.slice(i, i + 20)
-				await flushBatch(chunk, atproto, state)
-			}
-			result.created += createBatch.length
-
-			// Populate steam_map for newly created games
-			for (const entry of createBatch) {
-				const steamId = (entry.record.externalIds as Record<string, unknown> | undefined)?.steam as string | undefined
-				if (steamId) {
-					const atUri = state.getEntity(entityType, entry.id)
-					if (atUri) {
-						state.setSteamMapping(String(entry.id), steamId, atUri)
-					}
+			// Flush creates
+			if (createBatch.length > 0) {
+				for (let i = 0; i < createBatch.length; i += 20) {
+					const chunk = createBatch.slice(i, i + 20)
+					await flushBatch(chunk, atproto, state)
 				}
-			}
+				result.created += createBatch.length
 
-			if (config.getSlug && config.happyviewUrl && config.happyviewApiKey) {
+				// Populate steam_map for newly created games
 				for (const entry of createBatch) {
-					if (entry.slug) {
-						const entityUri = state.getEntity(entityType, entry.id)
-						if (entityUri) {
-							try {
-								await putSlugViaXrpc(config.happyviewUrl, config.happyviewApiKey!, entityUri, entry.slug)
-							} catch (err) {
-								console.error(`  [!] Slug insert failed for ${entry.name}:`, (err as Error).message)
+					const steamId = (entry.record.externalIds as Record<string, unknown> | undefined)?.steam as string | undefined
+					if (steamId) {
+						const atUri = state.getEntity(entityType, entry.id)
+						if (atUri) {
+							state.setSteamMapping(String(entry.id), steamId, atUri)
+						}
+					}
+				}
+
+				if (config.getSlug && config.happyviewUrl && config.happyviewApiKey) {
+					for (const entry of createBatch) {
+						if (entry.slug) {
+							const entityUri = state.getEntity(entityType, entry.id)
+							if (entityUri) {
+								try {
+									await putSlugViaXrpc(config.happyviewUrl, config.happyviewApiKey!, entityUri, entry.slug)
+								} catch (err) {
+									console.error(`  [!] Slug insert failed for ${entry.name}:`, (err as Error).message)
+								}
 							}
 						}
 					}
 				}
 			}
-		}
 
-		const batchElapsed = ((Date.now() - batchStart) / 1000).toFixed(1)
-		console.log(`  [sync] ${entityType}: offset ${offset + items.length} (batch took ${batchElapsed}s)`)
+			const batchElapsed = ((Date.now() - batchStart) / 1000).toFixed(1)
+			console.log(`  [sync] ${entityType}: offset ${offset + items.length} (batch took ${batchElapsed}s)`)
+		}
+	} catch (err) {
+		if (!(err instanceof StopRun)) throw err
+		result.aborted = err.message
+		console.error(`[sync] [ALERT] ${entityType}: ${err.message}`)
+	}
+
+	// Circuit breaker: when a large share of the run failed per-entity, the
+	// cause is almost certainly not the entities (a bad HappyView deploy, say).
+	// Count the run as systemic and leave every streak alone.
+	const ratio = totalProcessed > 0 ? entityFailures.length / totalProcessed : 0
+	if (entityFailures.length > 0 && ratio > entityFailureRatio) {
+		result.systemic++
+		console.error(`[sync] [ALERT] ${entityType}: ${entityFailures.length} of ${totalProcessed} entities failed (${Math.round(ratio * 100)}% > ${Math.round(entityFailureRatio * 100)}%); treating the run as systemic and not counting it against any entity`)
+	} else if (!result.aborted) {
+		for (const { key, message } of entityFailures) {
+			const runs = state.recordFailedRun(entityType, key, syncStartedAt, message)
+			if (runs >= maxFailedRuns) {
+				console.warn(`  [!] ${entityType} ${key} has failed ${runs} runs in a row; moving it to failures so it stops holding the cursor`)
+				state.addFailure(entityType, key)
+				state.clearFailureStreak(entityType, key)
+				result.givenUp++
+				result.retryable--
+			}
+		}
 	}
 
 	// Moving the cursor past a failure drops that entity until IGDB touches it
 	// again, so only move it when nothing failed in a way a rerun could fix.
-	if (result.retryable === 0) {
+	if (result.retryable === 0 && !result.aborted) {
 		state.setLastSyncAt(entityType, syncStartedAt)
 		result.cursorAdvanced = true
 	} else {
 		console.warn(`[sync] ${entityType}: ${result.retryable} retryable failure(s); keeping the cursor at ${lastSyncAt ? new Date(lastSyncAt * 1000).toISOString() : 'none'} so the next run retries them`)
 	}
-	console.log(`[sync] ${entityType}: done (created=${result.created}, updated=${result.updated}, skipped=${result.skipped}, failed=${result.failed}, retryable=${result.retryable}, givenUp=${result.givenUp})`)
+	console.log(`[sync] ${entityType}: done (created=${result.created}, updated=${result.updated}, skipped=${result.skipped}, failed=${result.failed}, retryable=${result.retryable}, givenUp=${result.givenUp}, systemic=${result.systemic}${result.aborted ? ', aborted' : ''})`)
 	return result
 }
