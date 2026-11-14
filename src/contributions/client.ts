@@ -1,5 +1,25 @@
 import { HappyViewNodeClient } from '@happyview/oauth-client-node'
 import { FileStorage } from './storage.js'
+import { fetchWithRetry, type RetryOptions } from './retry.js'
+
+/** A HappyView request that came back with a non-OK status. */
+export class ContributionRequestError extends Error {
+	constructor(
+		readonly operation: string,
+		readonly status: number,
+		body: string,
+	) {
+		super(`${operation} returned ${status}: ${body}`)
+		this.name = 'ContributionRequestError'
+	}
+}
+
+/** The stored game record, without the read-time hydration getGame adds. */
+export interface RawGameRecord {
+	uri: string
+	cid?: string
+	value: Record<string, unknown>
+}
 
 export interface GameLookupResult {
 	uri: string
@@ -17,6 +37,9 @@ export interface ContributionClientOptions {
 	clientKey: string
 	clientSecret: string
 	storagePath?: string
+	retry?: RetryOptions
+	/** Injectable for tests. Defaults to the global fetch. */
+	fetch?: typeof fetch
 }
 
 export class ContributionClient {
@@ -24,10 +47,14 @@ export class ContributionClient {
 	private session: Awaited<ReturnType<HappyViewNodeClient['restore']>> | null = null
 	private instanceUrl: string
 	private clientKey: string
+	private retry: RetryOptions
+	private fetchImpl: typeof fetch
 
 	constructor(options: ContributionClientOptions) {
 		this.instanceUrl = options.instanceUrl
 		this.clientKey = options.clientKey
+		this.retry = options.retry ?? {}
+		this.fetchImpl = options.fetch ?? ((...args) => fetch(...args))
 		this.hvClient = new HappyViewNodeClient({
 			instanceUrl: options.instanceUrl,
 			clientId: options.clientId,
@@ -59,18 +86,19 @@ export class ContributionClient {
 			throw new Error('Not authenticated — call restore() first')
 		}
 
-		const response = await this.session.fetchHandler(
+		const session = this.session
+		const response = await fetchWithRetry('uploadBlob', () => session.fetchHandler(
 			`${this.instanceUrl}/xrpc/com.atproto.repo.uploadBlob`,
 			{
 				method: 'POST',
 				headers: { 'Content-Type': mimeType },
 				body: Buffer.from(data),
 			},
-		)
+		), this.retry)
 
 		if (!response.ok) {
 			const errorBody = await response.text()
-			throw new Error(`uploadBlob returned ${response.status}: ${errorBody}`)
+			throw new ContributionRequestError('uploadBlob', response.status, errorBody)
 		}
 
 		const result = await response.json() as { blob: { ref: { $link: string }; mimeType: string; size: number } }
@@ -83,9 +111,9 @@ export class ContributionClient {
 
 	async getGameByIgdbId(igdbId: string): Promise<GameLookupResult | null> {
 		const url = `${this.instanceUrl}/xrpc/games.gamesgamesgamesgames.getGame?igdbId=${encodeURIComponent(igdbId)}`
-		const response = await fetch(url, {
+		const response = await fetchWithRetry('getGame', () => this.fetchImpl(url, {
 			headers: { 'X-Client-Key': this.clientKey },
-		})
+		}), this.retry)
 
 		if (response.status === 404 || response.status === 400) {
 			return null
@@ -93,13 +121,18 @@ export class ContributionClient {
 
 		if (!response.ok) {
 			const body = await response.text()
-			throw new Error(`getGame returned ${response.status}: ${body}`)
+			throw new ContributionRequestError('getGame', response.status, body)
 		}
 
-		const data = await response.json() as { game: Record<string, unknown> & { uri: string; redirectedFrom?: string } }
+		// getGame answers 200 with no `game` for an IGDB id it does not know.
+		const data = await response.json() as { game?: (Record<string, unknown> & { uri?: string; redirectedFrom?: string }) | null }
+		if (!data.game || typeof data.game.uri !== 'string') {
+			return null
+		}
+
 		return {
 			uri: data.game.uri,
-			record: data.game,
+			record: data.game as Record<string, unknown>,
 			redirectedFrom: data.game.redirectedFrom,
 		}
 	}
@@ -109,10 +142,33 @@ export class ContributionClient {
 			throw new Error('Not authenticated — call restore() first')
 		}
 
-		const response = await fetch(
-			`${this.instanceUrl}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(this.session.did)}&collection=${encodeURIComponent(collection)}&rkey=${encodeURIComponent(rkey)}`,
-			{ headers: { 'X-Client-Key': this.clientKey } },
-		)
+		const result = await this.fetchRecord(this.session.did, collection, rkey)
+		return result as Record<string, unknown> | null
+	}
+
+	/**
+	 * Fetch the stored game record behind a URI. getGame's response is hydrated
+	 * for display (release platform names and so on), so diffing against it
+	 * reports changes that are not there.
+	 */
+	async getGameRecord(uri: string): Promise<RawGameRecord | null> {
+		const match = uri.match(/^at:\/\/([^/]+)\/([^/]+)\/([^/]+)$/)
+		if (!match) {
+			throw new Error(`not a record URI: ${uri}`)
+		}
+		const [, repo, collection, rkey] = match
+		const result = await this.fetchRecord(repo, collection, rkey) as { uri?: string; cid?: string; value?: Record<string, unknown> } | null
+		if (!result || !result.value) {
+			return null
+		}
+		return { uri: result.uri ?? uri, cid: result.cid, value: result.value }
+	}
+
+	private async fetchRecord(repo: string, collection: string, rkey: string): Promise<unknown | null> {
+		const url = `${this.instanceUrl}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(repo)}&collection=${encodeURIComponent(collection)}&rkey=${encodeURIComponent(rkey)}`
+		const response = await fetchWithRetry('getRecord', () => this.fetchImpl(url, {
+			headers: { 'X-Client-Key': this.clientKey },
+		}), this.retry)
 
 		if (response.status === 404 || response.status === 400) {
 			return null
@@ -120,10 +176,10 @@ export class ContributionClient {
 
 		if (!response.ok) {
 			const body = await response.text()
-			throw new Error(`getRecord returned ${response.status}: ${body}`)
+			throw new ContributionRequestError('getRecord', response.status, body)
 		}
 
-		return await response.json() as Record<string, unknown>
+		return await response.json()
 	}
 
 	async createContribution(params: {
@@ -147,18 +203,19 @@ export class ContributionClient {
 			body.rkey = params.rkey
 		}
 
-		const response = await this.session.fetchHandler(
+		const session = this.session
+		const response = await fetchWithRetry('createContribution', () => session.fetchHandler(
 			`${this.instanceUrl}/xrpc/games.gamesgamesgamesgames.createContribution`,
 			{
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify(body),
 			},
-		)
+		), this.retry)
 
 		if (!response.ok) {
 			const errorBody = await response.text()
-			throw new Error(`createContribution returned ${response.status}: ${errorBody}`)
+			throw new ContributionRequestError('createContribution', response.status, errorBody)
 		}
 
 		return await response.json() as ContributionResult

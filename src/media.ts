@@ -9,9 +9,117 @@ import type { IGDBClient } from './igdb/client.js'
 import type { StateManager } from './state.js'
 import { ConcurrencyPool } from './concurrency.js'
 
+export interface UploadedBlob { ref: { $link: string }; mimeType: string; size: number }
+
+export interface UploadOptions {
+	/** The IGDB image the bytes came from, when there is one. */
+	imageId?: string
+}
+
 /** Any object that can upload blobs — satisfied by both AtprotoClient and ContributionClient. */
 export interface BlobUploader {
-	uploadBlob(data: Uint8Array, mimeType: string): Promise<{ ref: { $link: string }; mimeType: string; size: number }>
+	uploadBlob(data: Uint8Array, mimeType: string, options?: UploadOptions): Promise<UploadedBlob>
+	/** Optional: whether a blob already in the cache still has to reach another repo. */
+	needsMirror?(imageId: string): boolean
+	/** Optional: send a cached blob's bytes to that other repo. `expectedCid` is the cached CID. */
+	mirrorCached?(imageId: string, data: Uint8Array, mimeType: string, expectedCid: string): Promise<void>
+}
+
+/** A repo the mirror copies blobs into. One attempt per blob, no waiting. */
+export interface MirrorTarget {
+	uploadBlobOnce(data: Uint8Array, mimeType: string): Promise<UploadedBlob>
+}
+
+/** Where the mirror records which cached blobs it has copied. */
+export interface MirrorLedger {
+	isBlobMirrored(imageId: string): boolean
+	setBlobMirrored(imageId: string): void
+}
+
+/**
+ * Fails loudly when the account the sync logged in with is not the catalogue
+ * account. Mirrored media would otherwise land in some other repo and every
+ * auto-accepted media change would fall back.
+ */
+export function assertCatalogueAccount(actualDid: string, expectedDid: string | undefined): void {
+	if (!expectedDid) {
+		throw new Error('PENTARACT_DID is not set: it must name the catalogue account game media is mirrored to')
+	}
+	if (actualDid !== expectedDid) {
+		throw new Error(`ATPROTO_IDENTIFIER logs in as ${actualDid}, but PENTARACT_DID is ${expectedDid}: refusing to mirror media into the wrong repo`)
+	}
+}
+
+/**
+ * Uploads each blob to the contributor's repo and also to the catalogue repo.
+ *
+ * A contribution's media references blobs in the contributor's repo, but once
+ * it is accepted the same media lands on a game in the catalogue repo, and a
+ * PDS refuses a record that references a blob it does not hold. Uploading the
+ * same bytes to both gives the same CID in both places. A failed mirror upload
+ * only logs: auto-accept then applies the rest of the contribution and leaves
+ * the game's media as it was.
+ */
+export class MirroringBlobUploader implements BlobUploader {
+	constructor(
+		private readonly primary: BlobUploader,
+		private readonly mirror: MirrorTarget,
+		private readonly ledger?: MirrorLedger,
+	) {}
+
+	async uploadBlob(data: Uint8Array, mimeType: string, options?: UploadOptions): Promise<UploadedBlob> {
+		const result = await this.primary.uploadBlob(data, mimeType, options)
+		await this.copy(data, mimeType, result.ref.$link, options?.imageId)
+		return result
+	}
+
+	needsMirror(imageId: string): boolean {
+		return !!this.ledger && !this.ledger.isBlobMirrored(imageId)
+	}
+
+	async mirrorCached(imageId: string, data: Uint8Array, mimeType: string, expectedCid: string): Promise<void> {
+		await this.copy(data, mimeType, expectedCid, imageId)
+	}
+
+	/** One attempt, so a rate-limited catalogue PDS never stalls the sync. */
+	private async copy(data: Uint8Array, mimeType: string, expectedCid: string | undefined, imageId: string | undefined): Promise<void> {
+		try {
+			const mirrored = await this.mirror.uploadBlobOnce(data, mimeType)
+			if (expectedCid && mirrored.ref.$link !== expectedCid) {
+				console.warn(`[media] Mirrored blob CID ${mirrored.ref.$link} differs from ${expectedCid}`)
+				return
+			}
+			if (imageId) this.ledger?.setBlobMirrored(imageId)
+		} catch (err) {
+			console.warn(`[media] Failed to mirror blob ${expectedCid ?? imageId ?? ''} to the catalogue repo:`, (err as Error).message)
+		}
+	}
+}
+
+/**
+ * For a cache hit: when the uploader still needs this blob in another repo,
+ * download it again and mirror it. Never throws; the cached ref stands either
+ * way. A blob cached while uploads went only to the contributor's repo may
+ * still be missing from the catalogue repo.
+ */
+async function mirrorCacheHit(
+	uploader: BlobUploader,
+	igdb: IGDBClient,
+	imageId: string,
+	size: string,
+	cached: { ref: { $link: string }; mimeType: string },
+	runDownload: <R>(fn: () => Promise<R>) => Promise<R> = (fn) => fn(),
+	runUpload: <R>(fn: () => Promise<R>) => Promise<R> = (fn) => fn(),
+): Promise<void> {
+	if (!uploader.needsMirror?.(imageId) || !uploader.mirrorCached) return
+	let bytes: Buffer
+	try {
+		bytes = await runDownload(() => igdb.downloadImage(imageId, size))
+	} catch (err) {
+		console.warn(`[igdb] Failed to download image ${imageId} for mirroring:`, (err as Error).message)
+		return
+	}
+	await runUpload(() => uploader.mirrorCached!(imageId, bytes, cached.mimeType, cached.ref.$link))
 }
 
 /** The blob reference shape used in atproto records. */
@@ -56,6 +164,7 @@ export async function uploadIGDBImage(
 	// Check cache first
 	if (state.hasBlob(imageId)) {
 		const cached = state.getBlob(imageId)!
+		await mirrorCacheHit(atproto, igdb, imageId, size, cached)
 		return {
 			$type: 'blob',
 			ref: cached.ref,
@@ -73,7 +182,7 @@ export async function uploadIGDBImage(
 	}
 
 	try {
-		const blobResult = await atproto.uploadBlob(imageBuffer, 'image/jpeg')
+		const blobResult = await atproto.uploadBlob(imageBuffer, 'image/jpeg', { imageId })
 
 		// Cache the result
 		state.setBlob(imageId, blobResult)
@@ -174,6 +283,7 @@ export async function buildMediaItemsConcurrent(
 			// Check cache first (no pool needed)
 			if (state.hasBlob(task.imageId)) {
 				const cached = state.getBlob(task.imageId)!
+				await mirrorCacheHit(atproto, igdb, task.imageId, size, cached, (fn) => dlPool.run(fn), (fn) => ulPool.run(fn))
 				const blobRef: BlobRef = {
 					$type: 'blob',
 					ref: cached.ref,
@@ -198,7 +308,7 @@ export async function buildMediaItemsConcurrent(
 
 			// Upload via upload pool
 			try {
-				const blobResult = await ulPool.run(() => atproto.uploadBlob(imageBuffer, 'image/jpeg'))
+				const blobResult = await ulPool.run(() => atproto.uploadBlob(imageBuffer, 'image/jpeg', { imageId: task.imageId }))
 				state.setBlob(task.imageId, blobResult)
 
 				const blobRef: BlobRef = {

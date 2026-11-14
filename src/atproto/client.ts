@@ -109,6 +109,22 @@ export class AtprotoClient {
 		}, 'uploadBlob')
 	}
 
+	/**
+	 * Upload a blob with a single attempt: no retries and no waiting for a
+	 * rate-limit reset. For best-effort copies that must not stall the caller.
+	 */
+	async uploadBlobOnce(
+		data: Uint8Array,
+		mimeType: string,
+	): Promise<{ ref: { $link: string }; mimeType: string; size: number }> {
+		const response = await this.agent.uploadBlob(data, { encoding: mimeType })
+		return {
+			ref: { $link: response.data.blob.ref.toString() },
+			mimeType: response.data.blob.mimeType,
+			size: response.data.blob.size,
+		}
+	}
+
 	/** Create a record in the authenticated user's repo. */
 	async createRecord(
 		collection: string,
