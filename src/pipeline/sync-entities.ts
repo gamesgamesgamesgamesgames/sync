@@ -291,7 +291,12 @@ export async function syncEntityType<T extends { id: number }>(
 		result.failed++
 		const kind = classifyFailure(err)
 		if (kind === 'permanent') {
-			if (key) state.addFailure(entityType, key)
+			if (key) {
+				state.addFailure(entityType, key)
+				// A stale streak would make a later failure of this game during a
+				// breaker trip count as "already failing".
+				state.clearFailureStreak(entityType, key)
+			}
 			return
 		}
 		result.retryable++
