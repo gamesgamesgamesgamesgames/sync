@@ -48,6 +48,8 @@ export interface SyncEntityConfig<T extends { id: number }> {
 	breakerMinFailures?: number
 	/** The breaker trips when this many per-entity failures share one error (default SYNC_BREAKER_SAME_ERROR or 10). */
 	breakerSameError?: number
+	/** Consecutive tripped runs after which failures are charged again (default SYNC_BREAKER_MAX_TRIPS or 3). */
+	maxBreakerTrips?: number
 }
 
 export interface SyncResult {
@@ -264,6 +266,7 @@ export async function syncEntityType<T extends { id: number }>(
 	const entityFailures: Array<{ key: string; message: string }> = []
 	const breakerMinFailures = config.breakerMinFailures ?? envNumber('SYNC_BREAKER_MIN_FAILURES', 5)
 	const breakerSameError = config.breakerSameError ?? envNumber('SYNC_BREAKER_SAME_ERROR', 10)
+	const maxBreakerTrips = config.maxBreakerTrips ?? envNumber('SYNC_BREAKER_MAX_TRIPS', 3)
 	// Writes this run attempted: createContribution calls on the contribution
 	// path, record writes on the direct path. Most games are skipped before
 	// they write anything, so this, not every game seen, is the breaker's
@@ -510,11 +513,15 @@ export async function syncEntityType<T extends { id: number }>(
 		minFailures: breakerMinFailures,
 		sameError: breakerSameError,
 	})
-	if (tripped) {
-		result.systemic++
-		console.error(`[sync] [ALERT] ${entityType}: ${tripped}; treating the run as systemic and not counting it against any entity`)
-	} else if (!result.aborted) {
-		for (const { key, message } of entityFailures) {
+	// Consecutive tripped runs, and when the first of them ran. A cluster of
+	// games failing the same way can trip the breaker every night (re-scanned
+	// games with existing contributions skip before writing, so write attempts
+	// stay low), so the exemption is bounded.
+	const tripsKey = `breaker_trips_${entityType}`
+	const previousTrips = state.getMetaNumber(tripsKey) ?? 0
+
+	const charge = (failures: typeof entityFailures) => {
+		for (const { key, message } of failures) {
 			const runs = state.recordFailedRun(entityType, key, syncStartedAt, message)
 			if (runs >= maxFailedRuns) {
 				console.warn(`  [!] ${entityType} ${key} has failed ${runs} runs in a row; moving it to failures so it stops holding the cursor`)
@@ -524,6 +531,28 @@ export async function syncEntityType<T extends { id: number }>(
 				result.retryable--
 			}
 		}
+	}
+
+	if (tripped) {
+		result.systemic++
+		const trips = previousTrips + 1
+		state.setMeta(tripsKey, String(trips))
+
+		if (trips > maxBreakerTrips) {
+			console.error(`[sync] [ALERT] [BREAKER STUCK] ${entityType}: the breaker has tripped ${trips} runs in a row (limit ${maxBreakerTrips}); ${tripped}. Charging failures to their games again so the cursor can move. Look at these failures now.`)
+			if (!result.aborted) charge(entityFailures)
+		} else {
+			console.error(`[sync] [ALERT] ${entityType}: ${tripped}; treating the run as systemic (trip ${trips} of ${maxBreakerTrips})`)
+			// Only failures that began with the trip are exempt. A game that was
+			// already failing before it keeps its streak moving. Exempt games get
+			// no streak during tripped runs, so "has a streak" is the same as
+			// "started failing before the first trip".
+			const alreadyFailing = entityFailures.filter((f) => state.getFailureStreak(entityType, f.key) > 0)
+			if (!result.aborted) charge(alreadyFailing)
+		}
+	} else {
+		state.setMeta(tripsKey, '0')
+		if (!result.aborted) charge(entityFailures)
 	}
 
 	// Moving the cursor past a failure drops that entity until IGDB touches it
