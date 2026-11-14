@@ -73,3 +73,63 @@ describe('ContributionClient.getGameRecord', () => {
 		expect(await client(fetchImpl as unknown as typeof fetch).getGameRecord('at://did:web:x/games.gamesgamesgamesgames.game/a')).toBeNull()
 	})
 })
+
+describe('ContributionClient.queueAutoAcceptSweep', () => {
+	function withSession(fetchHandler: (url: string, init: RequestInit) => Promise<Response>) {
+		const c = client(vi.fn() as unknown as typeof fetch)
+		;(c as unknown as { session: unknown }).session = { did: 'did:plc:sync', fetchHandler: vi.fn(fetchHandler) }
+		return c
+	}
+
+	test('posts to autoAcceptContributions with the limit and returns the job id', async () => {
+		let seen: { url: string; body: unknown } | undefined
+		const c = withSession(async (url, init) => {
+			seen = { url, body: JSON.parse(String(init.body)) }
+			return json(200, { jobId: 'job-9' })
+		})
+		expect(await c.queueAutoAcceptSweep(1234)).toEqual({ jobId: 'job-9', alreadyQueued: false })
+		expect(seen?.url).toBe('https://hv.test/xrpc/games.gamesgamesgamesgames.autoAcceptContributions')
+		expect(seen?.body).toEqual({ limit: 1234 })
+	})
+
+	test('retries a 429', async () => {
+		let n = 0
+		const c = withSession(async () => (++n === 1 ? json(429, { error: 'RateLimited' }, { 'Retry-After': '1' }) : json(200, { jobId: 'job-2' })))
+		expect((await c.queueAutoAcceptSweep()).jobId).toBe('job-2')
+		expect(n).toBe(2)
+	})
+
+	test('reports a sweep that was already queued', async () => {
+		const c = withSession(async () => json(200, { jobId: 'job-3', alreadyQueued: true }))
+		expect(await c.queueAutoAcceptSweep()).toEqual({ jobId: 'job-3', alreadyQueued: true })
+	})
+
+	test('passes the existing sweep\'s start time through', async () => {
+		const c = withSession(async () => json(200, { jobId: 'job-4', alreadyQueued: true, status: 'running', startedAt: '2026-11-14T00:00:00Z' }))
+		expect(await c.queueAutoAcceptSweep()).toEqual({ jobId: 'job-4', alreadyQueued: true, startedAt: '2026-11-14T00:00:00Z' })
+	})
+
+	test('a sweep running for more than 24 hours looks hung', () => {
+		const now = Date.parse('2026-11-15T01:00:00Z')
+		expect(ContributionClient.sweepLooksHung({ alreadyQueued: true, startedAt: '2026-11-14T00:00:00Z' }, now)).toBe(true)
+		expect(ContributionClient.sweepLooksHung({ alreadyQueued: true, startedAt: '2026-11-14T02:00:00Z' }, now)).toBe(false)
+	})
+
+	test('a pending, new or undated sweep never looks hung', () => {
+		const now = Date.parse('2026-11-20T00:00:00Z')
+		expect(ContributionClient.sweepLooksHung({ alreadyQueued: true }, now)).toBe(false)
+		expect(ContributionClient.sweepLooksHung({ alreadyQueued: false, startedAt: '2026-11-01T00:00:00Z' }, now)).toBe(false)
+		expect(ContributionClient.sweepLooksHung({ alreadyQueued: true, startedAt: 'not a date' }, now)).toBe(false)
+	})
+
+	test('a refusal throws with its status', async () => {
+		const c = withSession(async () => json(500, { error: 'unauthorized' }))
+		const err = await c.queueAutoAcceptSweep().catch((e) => e)
+		expect(err).toBeInstanceOf(ContributionRequestError)
+		expect(err.status).toBe(500)
+	})
+
+	test('needs a session', async () => {
+		await expect(client(vi.fn() as unknown as typeof fetch).queueAutoAcceptSweep()).rejects.toThrow(/restore/)
+	})
+})
