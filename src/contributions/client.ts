@@ -182,6 +182,45 @@ export class ContributionClient {
 		return await response.json()
 	}
 
+	/**
+	 * Queue an auto-accept sweep of this account's own pending contributions.
+	 * It retries media deferrals and jobs that failed, which nothing else does
+	 * until HappyView can schedule jobs itself.
+	 */
+	async queueAutoAcceptSweep(limit = 5000): Promise<{ jobId: string; alreadyQueued: boolean; startedAt?: string }> {
+		if (!this.session) {
+			throw new Error('Not authenticated — call restore() first')
+		}
+		const session = this.session
+		const response = await fetchWithRetry('autoAcceptContributions', () => session.fetchHandler(
+			`${this.instanceUrl}/xrpc/games.gamesgamesgamesgames.autoAcceptContributions`,
+			{
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ limit }),
+			},
+		), this.retry)
+		if (!response.ok) {
+			throw new ContributionRequestError('autoAcceptContributions', response.status, await response.text())
+		}
+		// HappyView answers with the sweep already pending or running, rather
+		// than a second one, when there is one (a retried POST, or last night's
+		// sweep still draining).
+		const { jobId, alreadyQueued, startedAt } = await response.json() as { jobId: string; alreadyQueued?: boolean; startedAt?: string }
+		return { jobId, alreadyQueued: alreadyQueued === true, ...(startedAt ? { startedAt } : {}) }
+	}
+
+	/**
+	 * Whether an already-queued sweep has been running so long that its worker
+	 * is probably stuck. A sweep chains jobs of at most 5000 rows each, so no
+	 * single job should run for a day.
+	 */
+	static sweepLooksHung(result: { alreadyQueued: boolean; startedAt?: string }, now = Date.now(), maxHours = 24): boolean {
+		if (!result.alreadyQueued || !result.startedAt) return false
+		const started = Date.parse(result.startedAt)
+		return Number.isFinite(started) && now - started > maxHours * 3600 * 1000
+	}
+
 	async createContribution(params: {
 		contributionType: 'correction' | 'addition' | 'newGame'
 		changes: Record<string, unknown>
