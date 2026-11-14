@@ -241,6 +241,17 @@ describe('syncEntityType cursor', () => {
 		expect(state.getFailureStreak('game', '2')).toBe(0)
 	})
 
+	test('a permanent failure clears the game\'s streak', async () => {
+		let status = 500
+		const client = writingClient((id) => (id === 1 ? new ContributionRequestError('createContribution', status, 'refused') : null))
+		day(1); await run(client)
+		expect(state.getFailureStreak('game', '1')).toBe(1)
+		status = 400
+		day(2); await run(client)
+		expect(state.getFailures('game')).toEqual(['1'])
+		expect(state.getFailureStreak('game', '1')).toBe(0)
+	})
+
 	test('a run that does not trip resets the trip count', async () => {
 		const cluster = skippingClient((id) => (id <= 6 ? clusterError(id) : null), (id) => id > 6)
 		day(1); await run(cluster, range(50))
