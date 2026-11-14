@@ -53,3 +53,25 @@ describe('diffGameRecord', () => {
 		expect(diffGameRecord(mapped, current)).toEqual({})
 	})
 })
+
+describe('diffGameRecord externalIds', () => {
+	test('merges IGDB ids over the stored ones instead of replacing them', () => {
+		const mapped = { externalIds: { igdb: '1', steam: '400' } }
+		const current = { externalIds: { igdb: '1', twitch: '555' } }
+		expect(diffGameRecord(mapped, current)).toEqual({
+			externalIds: { igdb: '1', twitch: '555', steam: '400' },
+		})
+	})
+
+	test('ids that add nothing new are not a change', () => {
+		const mapped = { externalIds: { igdb: '1' } }
+		const current = { externalIds: { igdb: '1', twitch: '555' } }
+		expect(diffGameRecord(mapped, current)).toEqual({})
+	})
+
+	test('an IGDB value overrides a stored one for the same service', () => {
+		const mapped = { externalIds: { steam: '401' } }
+		const current = { externalIds: { steam: '400', twitch: '555' } }
+		expect(diffGameRecord(mapped, current)).toEqual({ externalIds: { steam: '401', twitch: '555' } })
+	})
+})
