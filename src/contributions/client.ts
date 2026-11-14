@@ -187,7 +187,7 @@ export class ContributionClient {
 	 * It retries media deferrals and jobs that failed, which nothing else does
 	 * until HappyView can schedule jobs itself.
 	 */
-	async queueAutoAcceptSweep(limit = 5000): Promise<string> {
+	async queueAutoAcceptSweep(limit = 5000): Promise<{ jobId: string; alreadyQueued: boolean }> {
 		if (!this.session) {
 			throw new Error('Not authenticated — call restore() first')
 		}
@@ -203,8 +203,11 @@ export class ContributionClient {
 		if (!response.ok) {
 			throw new ContributionRequestError('autoAcceptContributions', response.status, await response.text())
 		}
-		const { jobId } = await response.json() as { jobId: string }
-		return jobId
+		// HappyView answers with the sweep already pending or running, rather
+		// than a second one, when there is one (a retried POST, or last night's
+		// sweep still draining).
+		const { jobId, alreadyQueued } = await response.json() as { jobId: string; alreadyQueued?: boolean }
+		return { jobId, alreadyQueued: alreadyQueued === true }
 	}
 
 	async createContribution(params: {

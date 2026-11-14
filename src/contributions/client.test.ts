@@ -87,7 +87,7 @@ describe('ContributionClient.queueAutoAcceptSweep', () => {
 			seen = { url, body: JSON.parse(String(init.body)) }
 			return json(200, { jobId: 'job-9' })
 		})
-		expect(await c.queueAutoAcceptSweep(1234)).toBe('job-9')
+		expect(await c.queueAutoAcceptSweep(1234)).toEqual({ jobId: 'job-9', alreadyQueued: false })
 		expect(seen?.url).toBe('https://hv.test/xrpc/games.gamesgamesgamesgames.autoAcceptContributions')
 		expect(seen?.body).toEqual({ limit: 1234 })
 	})
@@ -95,8 +95,13 @@ describe('ContributionClient.queueAutoAcceptSweep', () => {
 	test('retries a 429', async () => {
 		let n = 0
 		const c = withSession(async () => (++n === 1 ? json(429, { error: 'RateLimited' }, { 'Retry-After': '1' }) : json(200, { jobId: 'job-2' })))
-		expect(await c.queueAutoAcceptSweep()).toBe('job-2')
+		expect((await c.queueAutoAcceptSweep()).jobId).toBe('job-2')
 		expect(n).toBe(2)
+	})
+
+	test('reports a sweep that was already queued', async () => {
+		const c = withSession(async () => json(200, { jobId: 'job-3', alreadyQueued: true }))
+		expect(await c.queueAutoAcceptSweep()).toEqual({ jobId: 'job-3', alreadyQueued: true })
 	})
 
 	test('a refusal throws with its status', async () => {
