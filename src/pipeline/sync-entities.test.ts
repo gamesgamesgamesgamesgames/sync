@@ -6,7 +6,7 @@ import { StateManager } from '../state.js'
 import { ContributionRequestError, type ContributionClient } from '../contributions/client.js'
 import type { IGDBClient } from '../igdb/client.js'
 import type { AtprotoClient } from '../atproto/client.js'
-import { classifyFailure, isPermanentFailure, needsAttention, syncEntityType } from './sync-entities.js'
+import { breakerTrips, classifyFailure, errorShape, isPermanentFailure, needsAttention, syncEntityType } from './sync-entities.js'
 
 const PREVIOUS_CURSOR = 1_781_308_800 // 2026-06-13
 
@@ -137,21 +137,78 @@ describe('syncEntityType cursor', () => {
 		expect(state.getLastSyncAt('platform')).toBe(PREVIOUS_CURSOR)
 	})
 
-	test('more than 20% of games failing per-game trips the breaker: no streaks move', async () => {
+	const range = (n: number) => Array.from({ length: n }, (_, i) => i + 1)
+	const nameId = (params: unknown) => Number((params as { changes: { name: string } }).changes.name.split(' ')[1])
+
+	/** A client whose createContribution fails for the games `fail` picks. */
+	function writingClient(fail: (id: number) => Error | null): ContributionClient {
+		return {
+			getGameByIgdbId: vi.fn(async () => null),
+			getGameRecord: vi.fn(async () => null),
+			getRecord: vi.fn(async () => null),
+			createContribution: vi.fn(async (params: unknown) => {
+				const err = fail(nameId(params))
+				if (err) throw err
+				return { uri: 'at://x/c/1' }
+			}),
+		} as unknown as ContributionClient
+	}
+
+	function skippingClient(fail: (id: number) => Error | null, skip: (id: number) => boolean): ContributionClient {
+		const client = writingClient(fail)
+		// getRecord finding the content-hash rkey means "already submitted": skip without writing.
+		let current = 0
+		;(client as unknown as { getRecord: unknown }).getRecord = vi.fn(async () => (skip(current) ? { exists: true } : null))
+		;(client as unknown as { getGameByIgdbId: unknown }).getGameByIgdbId = vi.fn(async (igdbId: string) => { current = Number(igdbId); return null })
+		return client
+	}
+
+	test('the breaker divides by write attempts: 6 failures among 6 writes trips it, though 50 games were seen', async () => {
+		const lua500 = (id: number) => new ContributionRequestError('createContribution', 500, `script error at game ${id}: field ${id} invalid`)
+		const client = skippingClient((id) => (id <= 6 ? lua500(id) : null), (id) => id > 6)
+		vi.spyOn(Date, 'now').mockReturnValue((PREVIOUS_CURSOR + 86400) * 1000)
+		const r = await run(client, range(50))
+		expect(client.createContribution).toHaveBeenCalledTimes(6)
+		expect(r.systemic).toBe(1)
+		expect(state.getFailureStreak('game', '1')).toBe(0)
+	})
+
+	test('a few failures among many writes does not trip it, and the games are charged', async () => {
+		const client = writingClient((id) => (id <= 6 ? new ContributionRequestError('createContribution', 500, `boom ${id} at://did:web:x/g/${id}`) : null))
+		vi.spyOn(Date, 'now').mockReturnValue((PREVIOUS_CURSOR + 86400) * 1000)
+		const r = await run(client, range(50))
+		expect(r.systemic).toBe(0)
+		expect(state.getFailureStreak('game', '1')).toBe(1)
+	})
+
+	test('many failures sharing one error trip it even at a low ratio', async () => {
+		const same = (id: number) => new ContributionRequestError('createContribution', 500, `{"error":"InternalServerError","message":"script error: attempt to index a nil value (field 'changes') for game ${id}"}`)
+		const client = writingClient((id) => (id <= 12 ? same(id) : null))
+		vi.spyOn(Date, 'now').mockReturnValue((PREVIOUS_CURSOR + 86400) * 1000)
+		const r = await run(client, range(100))
+		expect(r.systemic).toBe(1)
+		expect(state.getFailureStreak('game', '1')).toBe(0)
+	})
+
+	test('as many failures with different errors at a low ratio do not trip it', async () => {
+		const distinct = ['timeout reading body', 'invalid releases', 'name too long', 'bad media', 'unknown platform', 'duplicate slug', 'parent missing', 'engine missing', 'bad rating', 'bad website', 'bad video', 'bad keywords']
+		const client = writingClient((id) => (id <= 12 ? new ContributionRequestError('createContribution', 500, distinct[id - 1]!) : null))
+		vi.spyOn(Date, 'now').mockReturnValue((PREVIOUS_CURSOR + 86400) * 1000)
+		const r = await run(client, range(100))
+		expect(r.systemic).toBe(0)
+		expect(state.getFailureStreak('game', '12')).toBe(1)
+	})
+
+	test('the breaker trips over four runs and moves no streak', async () => {
 		const lua500 = () => new ContributionRequestError('createContribution', 500, 'script error')
-		const client = contributionClient(async (params) => {
-			const n = Number((params as { changes: { name: string } }).changes.name.split(' ')[1])
-			if (n <= 3) throw lua500()
-			return { uri: 'at://x/c/1' }
-		})
+		const client = writingClient((id) => (id <= 6 ? lua500() : null))
 		for (let run_ = 1; run_ <= 4; run_++) {
 			vi.spyOn(Date, 'now').mockReturnValue((PREVIOUS_CURSOR + run_ * 86400) * 1000)
-			const r = await run(client)
+			const r = await run(client, range(20))
 			expect(r.systemic).toBe(1)
 			expect(r.givenUp).toBe(0)
 			expect(r.cursorAdvanced).toBe(false)
 		}
-		expect(state.getFailureStreak('game', '1')).toBe(0)
 		expect(state.getFailures('game')).toEqual([])
 	})
 
@@ -265,6 +322,34 @@ describe('syncEntityType cursor', () => {
 		expect(result.retryable).toBe(0)
 		expect(result.cursorAdvanced).toBe(true)
 		expect(state.getFailures('game')).toEqual(['1'])
+	})
+})
+
+describe('breakerTrips', () => {
+	const limits = { ratio: 0.2, minFailures: 5, sameError: 10 }
+
+	test('never trips below the minimum, even at 100%', () => {
+		expect(breakerTrips(['a', 'b', 'c', 'd'], 0, limits)).toBeNull()
+	})
+
+	test('trips on the ratio of failures to write attempts', () => {
+		expect(breakerTrips(['a', 'b', 'c', 'd', 'e'], 20, limits)).toMatch(/write attempts/)
+		expect(breakerTrips(['a', 'b', 'c', 'd', 'e'], 30, limits)).toBeNull()
+	})
+
+	test('trips when enough failures share one error shape', () => {
+		const msgs = Array.from({ length: 10 }, (_, i) => `script error for game ${i} at at://did:web:x/g/${i}`)
+		expect(breakerTrips(msgs, 1000, limits)).toMatch(/share one error/)
+	})
+})
+
+describe('errorShape', () => {
+	test('drops ids, uris, dids and quoted values', () => {
+		expect(errorShape(`Failed for "Portal 2": game 42 at at://did:web:g/x/1 by did:plc:abc`)).toBe(errorShape(`Failed for "Half-Life": game 7 at at://did:web:g/x/2 by did:plc:xyz`))
+	})
+
+	test('keeps different causes apart', () => {
+		expect(errorShape('invalid releases')).not.toBe(errorShape('name too long'))
 	})
 })
 

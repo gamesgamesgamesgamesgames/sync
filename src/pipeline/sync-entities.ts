@@ -42,8 +42,12 @@ export interface SyncEntityConfig<T extends { id: number }> {
 	maxFailedRuns?: number
 	/** Warn when the cursor is older than this many hours (default SYNC_CURSOR_ALERT_HOURS or 72). */
 	cursorAlertHours?: number
-	/** Share of entities failing per-entity above which the run counts as systemic (default SYNC_ENTITY_FAILURE_RATIO or 0.2). */
+	/** Per-entity failures as a share of write attempts above which the run counts as systemic (default SYNC_ENTITY_FAILURE_RATIO or 0.2). */
 	entityFailureRatio?: number
+	/** The breaker never trips on fewer per-entity failures than this (default SYNC_BREAKER_MIN_FAILURES or 5). */
+	breakerMinFailures?: number
+	/** The breaker trips when this many per-entity failures share one error (default SYNC_BREAKER_SAME_ERROR or 10). */
+	breakerSameError?: number
 }
 
 export interface SyncResult {
@@ -126,6 +130,69 @@ function isAuthRefusal(err: unknown): boolean {
 		&& (err.status === 401 || err.status === 403)
 }
 
+/** Wraps a contribution client so each createContribution call is counted. */
+function countingClient(client: ContributionClient, onCreate: () => void): ContributionClient {
+	const counted = Object.create(client) as ContributionClient
+	counted.createContribution = (params) => {
+		onCreate()
+		return client.createContribution(params)
+	}
+	return counted
+}
+
+/**
+ * The shape of an error message with names, ids, URIs and numbers taken out,
+ * so failures from one cause group together.
+ */
+export function errorShape(message: string): string {
+	return message
+		.replace(/at:\/\/\S+/g, '<uri>')
+		.replace(/did:[a-z]+:[\w.:%-]+/g, '<did>')
+		.replace(/"[^"]*"|'[^']*'/g, '<str>')
+		.replace(/\d+/g, 'N')
+		.replace(/\s+/g, ' ')
+		.trim()
+		.toLowerCase()
+}
+
+export interface BreakerLimits {
+	ratio: number
+	minFailures: number
+	sameError: number
+}
+
+/**
+ * Whether a run's per-entity failures look like one systemic cause rather
+ * than individual bad entities. Returns why it tripped, or null.
+ *
+ * - Too many relative to writes attempted. Most games are skipped before they
+ *   write anything, so dividing by every game seen would hide a bad deploy.
+ * - Too many sharing one error, whatever the ratio. HappyView 2.17.5 answers
+ *   every Lua error() with the same 500 shape, so a script broken by a deploy
+ *   shows up as one message repeated.
+ *
+ * Neither trips on fewer than `minFailures`, so one bad game on a quiet night
+ * is still counted against that game.
+ */
+export function breakerTrips(messages: string[], writeAttempts: number, limits: BreakerLimits): string | null {
+	if (messages.length < limits.minFailures) return null
+	const ratio = messages.length / Math.max(writeAttempts, 1)
+	if (ratio > limits.ratio) {
+		return `${messages.length} per-entity failures against ${writeAttempts} write attempts (${Math.round(ratio * 100)}% > ${Math.round(limits.ratio * 100)}%)`
+	}
+	const shapes = new Map<string, number>()
+	for (const m of messages) {
+		const shape = errorShape(m)
+		shapes.set(shape, (shapes.get(shape) ?? 0) + 1)
+	}
+	for (const [shape, n] of shapes) {
+		if (n >= limits.sameError) {
+			return `${n} per-entity failures share one error: ${shape.slice(0, 160)}`
+		}
+	}
+	return null
+}
+
 function envNumber(name: string, fallback: number): number {
 	const value = Number(process.env[name])
 	return Number.isFinite(value) && value > 0 ? value : fallback
@@ -195,6 +262,14 @@ export async function syncEntityType<T extends { id: number }>(
 	const cursorAlertHours = config.cursorAlertHours ?? envNumber('SYNC_CURSOR_ALERT_HOURS', 72)
 	const entityFailureRatio = config.entityFailureRatio ?? envNumber('SYNC_ENTITY_FAILURE_RATIO', 0.2)
 	const entityFailures: Array<{ key: string; message: string }> = []
+	const breakerMinFailures = config.breakerMinFailures ?? envNumber('SYNC_BREAKER_MIN_FAILURES', 5)
+	const breakerSameError = config.breakerSameError ?? envNumber('SYNC_BREAKER_SAME_ERROR', 10)
+	// Writes this run attempted: createContribution calls on the contribution
+	// path, record writes on the direct path. Most games are skipped before
+	// they write anything, so this, not every game seen, is the breaker's
+	// denominator.
+	let writeAttempts = 0
+	const contributionClient = config.contributionClient && countingClient(config.contributionClient, () => { writeAttempts++ })
 
 	if (lastSyncAt) {
 		const ageHours = (syncStartedAt - lastSyncAt) / 3600
@@ -280,9 +355,9 @@ export async function syncEntityType<T extends { id: number }>(
 				const { key, record, existingUri, name, slug } = entry.value
 
 				// Contribution path: all games go through contributions
-				if (config.contributionClient && record) {
+				if (contributionClient && record) {
 					try {
-						const syncResult = await syncGameViaContribution(key, record, config.contributionClient)
+						const syncResult = await syncGameViaContribution(key, record, contributionClient)
 
 						state.clearFailureStreak(entityType, key)
 						if (syncResult.action === 'created') {
@@ -326,6 +401,7 @@ export async function syncEntityType<T extends { id: number }>(
 			}
 
 			// Flush updates
+			writeAttempts += updateBatch.length
 			for (let i = 0; i < updateBatch.length; i += updateBatchSize) {
 				const chunk = updateBatch.slice(i, i + updateBatchSize)
 				try {
@@ -382,6 +458,7 @@ export async function syncEntityType<T extends { id: number }>(
 			}
 
 			// Flush creates
+			writeAttempts += createBatch.length
 			if (createBatch.length > 0) {
 				for (let i = 0; i < createBatch.length; i += 20) {
 					const chunk = createBatch.slice(i, i + 20)
@@ -428,10 +505,14 @@ export async function syncEntityType<T extends { id: number }>(
 	// Circuit breaker: when a large share of the run failed per-entity, the
 	// cause is almost certainly not the entities (a bad HappyView deploy, say).
 	// Count the run as systemic and leave every streak alone.
-	const ratio = totalProcessed > 0 ? entityFailures.length / totalProcessed : 0
-	if (entityFailures.length > 0 && ratio > entityFailureRatio) {
+	const tripped = breakerTrips(entityFailures.map((f) => f.message), writeAttempts, {
+		ratio: entityFailureRatio,
+		minFailures: breakerMinFailures,
+		sameError: breakerSameError,
+	})
+	if (tripped) {
 		result.systemic++
-		console.error(`[sync] [ALERT] ${entityType}: ${entityFailures.length} of ${totalProcessed} entities failed (${Math.round(ratio * 100)}% > ${Math.round(entityFailureRatio * 100)}%); treating the run as systemic and not counting it against any entity`)
+		console.error(`[sync] [ALERT] ${entityType}: ${tripped}; treating the run as systemic and not counting it against any entity`)
 	} else if (!result.aborted) {
 		for (const { key, message } of entityFailures) {
 			const runs = state.recordFailedRun(entityType, key, syncStartedAt, message)
