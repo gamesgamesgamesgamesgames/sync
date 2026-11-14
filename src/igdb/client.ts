@@ -24,10 +24,12 @@ export class IGDBClient {
 	private accessToken: string | null = null
 	private tokenExpiresAt: number = 0
 	private requestTimestamps: number[] = []
+	private retry: IGDBRetryOptions
 
-	constructor(clientId: string, clientSecret: string) {
+	constructor(clientId: string, clientSecret: string, retry: IGDBRetryOptions = {}) {
 		this.clientId = clientId
 		this.clientSecret = clientSecret
+		this.retry = retry
 	}
 
 	/** Authenticate with Twitch to get an IGDB access token. */
@@ -96,7 +98,7 @@ export class IGDBClient {
 				Accept: 'application/json',
 			},
 			body,
-		})
+		}, this.retry)
 
 		if (response.status === 401) {
 			// Token expired — re-authenticate and retry once
@@ -161,7 +163,7 @@ export class IGDBClient {
 	/** Download an image from IGDB's image CDN (no rate limit — CDN has no per-client cap). */
 	async downloadImage(imageId: string, size: string = 'screenshot_huge'): Promise<Buffer> {
 		const url = `https://images.igdb.com/igdb/image/upload/t_${size}/${imageId}.jpg`
-		const response = await fetchWithRetry(url, {})
+		const response = await fetchWithRetry(url, {}, this.retry)
 
 		if (!response.ok) {
 			throw new Error(`Image download failed for ${imageId}: ${response.status}`)
@@ -177,38 +179,70 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-/** Fetch with retry and exponential backoff. */
-async function fetchWithRetry(
+export interface IGDBRetryOptions {
+	/** Retries after the first attempt (default 6). */
+	maxRetries?: number
+	/** First backoff wait; doubles each retry (default 2 s). */
+	baseDelayMs?: number
+	/** Upper bound on any single wait, Retry-After included (default 60 s). */
+	maxDelayMs?: number
+	/** Injectable for tests. */
+	fetch?: typeof fetch
+	/** Injectable for tests. */
+	sleep?: (ms: number, label: string) => Promise<void>
+}
+
+/**
+ * Fetch with bounded retries for 429, 5xx and network errors.
+ *
+ * IGDB sits behind an API gateway that answers 504 "Endpoint request timed
+ * out" when a query is slow. Those pass after a short wait, but the old three
+ * quick retries (7 s in all) were not enough, and a single 504 ended the
+ * nightly run. Waits double from `baseDelayMs` and never exceed
+ * `maxDelayMs`, so with the defaults a request gives up after about two
+ * minutes. When retries run out, the last response is returned, so callers
+ * still report the real status.
+ */
+export async function fetchWithRetry(
 	url: string,
 	init: RequestInit,
-	maxRetries: number = 3,
+	options: IGDBRetryOptions = {},
 ): Promise<Response> {
+	const maxRetries = options.maxRetries ?? 6
+	const baseDelayMs = options.baseDelayMs ?? 2000
+	const maxDelayMs = options.maxDelayMs ?? 60_000
+	const doFetch = options.fetch ?? fetch
+	const wait = options.sleep ?? countdownSleep
+	const backoff = (attempt: number) => Math.min(maxDelayMs, baseDelayMs * 2 ** attempt)
+
 	let lastError: Error | null = null
 
 	for (let attempt = 0; attempt <= maxRetries; attempt++) {
+		const isLast = attempt === maxRetries
 		try {
-			const response = await fetch(url, init)
+			const response = await doFetch(url, init)
 
-			if (response.status === 429) {
-				// Rate limited — check Retry-After header
-				const retryAfter = response.headers.get('Retry-After')
-				const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : 2000 * (attempt + 1)
-				await countdownSleep(waitMs, '[igdb] Rate limited')
+			if (response.status === 429 && !isLast) {
+				const retryAfter = Number(response.headers.get('Retry-After'))
+				const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+					? Math.min(maxDelayMs, retryAfter * 1000)
+					: backoff(attempt)
+				await response.text().catch(() => undefined)
+				await wait(waitMs, '[igdb] Rate limited')
 				continue
 			}
 
-			if (response.status >= 500 && attempt < maxRetries) {
-				const waitMs = 1000 * Math.pow(2, attempt)
-				await countdownSleep(waitMs, `[igdb] Server error (${response.status}), retrying`)
+			if (response.status >= 500 && !isLast) {
+				await response.text().catch(() => undefined)
+				await wait(backoff(attempt), `[igdb] Server error (${response.status}), retrying`)
 				continue
 			}
 
 			return response
 		} catch (err) {
 			lastError = err as Error
-			if (attempt < maxRetries) {
-				const waitMs = 1000 * Math.pow(2, attempt)
-				await countdownSleep(waitMs, `[igdb] Request failed (${lastError.message}), retrying`)
+			if (!isLast) {
+				await wait(backoff(attempt), `[igdb] Request failed (${lastError.message}), retrying`)
 			}
 		}
 	}
