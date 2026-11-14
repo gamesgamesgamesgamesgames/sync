@@ -199,17 +199,57 @@ describe('syncEntityType cursor', () => {
 		expect(state.getFailureStreak('game', '12')).toBe(1)
 	})
 
-	test('the breaker trips over four runs and moves no streak', async () => {
-		const lua500 = () => new ContributionRequestError('createContribution', 500, 'script error')
-		const client = writingClient((id) => (id <= 6 ? lua500() : null))
-		for (let run_ = 1; run_ <= 4; run_++) {
-			vi.spyOn(Date, 'now').mockReturnValue((PREVIOUS_CURSOR + run_ * 86400) * 1000)
-			const r = await run(client, range(20))
+	const day = (n: number) => vi.spyOn(Date, 'now').mockReturnValue((PREVIOUS_CURSOR + n * 86400) * 1000)
+	const clusterError = (id: number) => new ContributionRequestError('createContribution', 500, `script error: unknown applicationType for game ${id}`)
+
+	test('the breaker exempts a new cluster for 3 tripped runs, then charges it and the cursor moves on', async () => {
+		// 6 games fail the same way; the other 44 already have their contribution and skip before writing.
+		const client = skippingClient((id) => (id <= 6 ? clusterError(id) : null), (id) => id > 6)
+		for (let n = 1; n <= 3; n++) {
+			day(n)
+			const r = await run(client, range(50))
 			expect(r.systemic).toBe(1)
-			expect(r.givenUp).toBe(0)
-			expect(r.cursorAdvanced).toBe(false)
+			expect(state.getFailureStreak('game', '1')).toBe(0)
 		}
-		expect(state.getFailures('game')).toEqual([])
+		const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+		day(4)
+		let r = await run(client, range(50))
+		expect(err.mock.calls.some((c) => String(c[0]).includes('[BREAKER STUCK]'))).toBe(true)
+		expect(state.getFailureStreak('game', '1')).toBe(1)
+		day(5); await run(client, range(50))
+		day(6); r = await run(client, range(50))
+		expect(r.givenUp).toBe(6)
+		expect(r.cursorAdvanced).toBe(true)
+		expect(state.getFailures('game').sort()).toEqual(['1', '2', '3', '4', '5', '6'])
+	})
+
+	test('a game already failing before the breaker trips keeps its streak moving', async () => {
+		// Night 1: only game 1 fails. No trip; it gets a streak.
+		const lone = skippingClient((id) => (id === 1 ? new ContributionRequestError('createContribution', 500, 'bad releases') : null), () => false)
+		day(1)
+		const first = await run(lone, range(50))
+		expect(first.systemic).toBe(0)
+		expect(state.getFailureStreak('game', '1')).toBe(1)
+		// Nights 2-3: a cluster appears and trips the breaker; game 1 is still failing.
+		const cluster = skippingClient((id) => (id <= 7 ? clusterError(id) : null), (id) => id > 7)
+		day(2); await run(cluster, range(50))
+		expect(state.getFailureStreak('game', '1')).toBe(2)
+		expect(state.getFailureStreak('game', '2')).toBe(0)
+		day(3); const third = await run(cluster, range(50))
+		expect(third.systemic).toBe(1)
+		expect(state.getFailures('game')).toEqual(['1'])
+		expect(state.getFailureStreak('game', '2')).toBe(0)
+	})
+
+	test('a run that does not trip resets the trip count', async () => {
+		const cluster = skippingClient((id) => (id <= 6 ? clusterError(id) : null), (id) => id > 6)
+		day(1); await run(cluster, range(50))
+		day(2); await run(cluster, range(50))
+		day(3); await run(ok())
+		expect(state.getMetaNumber('breaker_trips_game')).toBe(0)
+		day(4); const r = await run(cluster, range(50))
+		expect(r.systemic).toBe(1)
+		expect(state.getFailureStreak('game', '1')).toBe(0)
 	})
 
 	test('a 502 from HappyView is systemic and counts against no game', async () => {
