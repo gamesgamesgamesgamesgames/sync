@@ -242,10 +242,15 @@ async function main() {
 	//    and failed auto-accept jobs get retried once a night. Best effort: a
 	//    failure here only needs attention, it loses nothing.
 	try {
-		const { jobId, alreadyQueued } = await contributionClient.queueAutoAcceptSweep()
-		console.log(alreadyQueued
-			? `[contributions] Auto-accept sweep ${jobId} is still pending or running; not queueing another`
-			: `[contributions] Queued auto-accept sweep ${jobId}`)
+		const sweep = await contributionClient.queueAutoAcceptSweep()
+		if (ContributionClient.sweepLooksHung(sweep)) {
+			console.error(`[contributions] [ALERT] Auto-accept sweep ${sweep.jobId} has been running since ${sweep.startedAt}; the job worker is probably stuck`)
+			attention.push(`auto-accept sweep ${sweep.jobId} running since ${sweep.startedAt}`)
+		} else {
+			console.log(sweep.alreadyQueued
+				? `[contributions] Auto-accept sweep ${sweep.jobId} is still pending or running; not queueing another`
+				: `[contributions] Queued auto-accept sweep ${sweep.jobId}`)
+		}
 	} catch (err) {
 		console.error('[contributions] Could not queue the auto-accept sweep:', (err as Error).message)
 		attention.push(`auto-accept sweep: ${(err as Error).message}`)

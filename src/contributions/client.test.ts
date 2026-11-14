@@ -104,6 +104,24 @@ describe('ContributionClient.queueAutoAcceptSweep', () => {
 		expect(await c.queueAutoAcceptSweep()).toEqual({ jobId: 'job-3', alreadyQueued: true })
 	})
 
+	test('passes the existing sweep\'s start time through', async () => {
+		const c = withSession(async () => json(200, { jobId: 'job-4', alreadyQueued: true, status: 'running', startedAt: '2026-11-14T00:00:00Z' }))
+		expect(await c.queueAutoAcceptSweep()).toEqual({ jobId: 'job-4', alreadyQueued: true, startedAt: '2026-11-14T00:00:00Z' })
+	})
+
+	test('a sweep running for more than 24 hours looks hung', () => {
+		const now = Date.parse('2026-11-15T01:00:00Z')
+		expect(ContributionClient.sweepLooksHung({ alreadyQueued: true, startedAt: '2026-11-14T00:00:00Z' }, now)).toBe(true)
+		expect(ContributionClient.sweepLooksHung({ alreadyQueued: true, startedAt: '2026-11-14T02:00:00Z' }, now)).toBe(false)
+	})
+
+	test('a pending, new or undated sweep never looks hung', () => {
+		const now = Date.parse('2026-11-20T00:00:00Z')
+		expect(ContributionClient.sweepLooksHung({ alreadyQueued: true }, now)).toBe(false)
+		expect(ContributionClient.sweepLooksHung({ alreadyQueued: false, startedAt: '2026-11-01T00:00:00Z' }, now)).toBe(false)
+		expect(ContributionClient.sweepLooksHung({ alreadyQueued: true, startedAt: 'not a date' }, now)).toBe(false)
+	})
+
 	test('a refusal throws with its status', async () => {
 		const c = withSession(async () => json(500, { error: 'unauthorized' }))
 		const err = await c.queueAutoAcceptSweep().catch((e) => e)
