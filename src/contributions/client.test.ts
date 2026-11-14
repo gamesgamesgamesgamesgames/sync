@@ -73,3 +73,40 @@ describe('ContributionClient.getGameRecord', () => {
 		expect(await client(fetchImpl as unknown as typeof fetch).getGameRecord('at://did:web:x/games.gamesgamesgamesgames.game/a')).toBeNull()
 	})
 })
+
+describe('ContributionClient.queueAutoAcceptSweep', () => {
+	function withSession(fetchHandler: (url: string, init: RequestInit) => Promise<Response>) {
+		const c = client(vi.fn() as unknown as typeof fetch)
+		;(c as unknown as { session: unknown }).session = { did: 'did:plc:sync', fetchHandler: vi.fn(fetchHandler) }
+		return c
+	}
+
+	test('posts to autoAcceptContributions with the limit and returns the job id', async () => {
+		let seen: { url: string; body: unknown } | undefined
+		const c = withSession(async (url, init) => {
+			seen = { url, body: JSON.parse(String(init.body)) }
+			return json(200, { jobId: 'job-9' })
+		})
+		expect(await c.queueAutoAcceptSweep(1234)).toBe('job-9')
+		expect(seen?.url).toBe('https://hv.test/xrpc/games.gamesgamesgamesgames.autoAcceptContributions')
+		expect(seen?.body).toEqual({ limit: 1234 })
+	})
+
+	test('retries a 429', async () => {
+		let n = 0
+		const c = withSession(async () => (++n === 1 ? json(429, { error: 'RateLimited' }, { 'Retry-After': '1' }) : json(200, { jobId: 'job-2' })))
+		expect(await c.queueAutoAcceptSweep()).toBe('job-2')
+		expect(n).toBe(2)
+	})
+
+	test('a refusal throws with its status', async () => {
+		const c = withSession(async () => json(500, { error: 'unauthorized' }))
+		const err = await c.queueAutoAcceptSweep().catch((e) => e)
+		expect(err).toBeInstanceOf(ContributionRequestError)
+		expect(err.status).toBe(500)
+	})
+
+	test('needs a session', async () => {
+		await expect(client(vi.fn() as unknown as typeof fetch).queueAutoAcceptSweep()).rejects.toThrow(/restore/)
+	})
+})

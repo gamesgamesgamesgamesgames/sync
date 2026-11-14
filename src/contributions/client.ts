@@ -182,6 +182,31 @@ export class ContributionClient {
 		return await response.json()
 	}
 
+	/**
+	 * Queue an auto-accept sweep of this account's own pending contributions.
+	 * It retries media deferrals and jobs that failed, which nothing else does
+	 * until HappyView can schedule jobs itself.
+	 */
+	async queueAutoAcceptSweep(limit = 5000): Promise<string> {
+		if (!this.session) {
+			throw new Error('Not authenticated — call restore() first')
+		}
+		const session = this.session
+		const response = await fetchWithRetry('autoAcceptContributions', () => session.fetchHandler(
+			`${this.instanceUrl}/xrpc/games.gamesgamesgamesgames.autoAcceptContributions`,
+			{
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ limit }),
+			},
+		), this.retry)
+		if (!response.ok) {
+			throw new ContributionRequestError('autoAcceptContributions', response.status, await response.text())
+		}
+		const { jobId } = await response.json() as { jobId: string }
+		return jobId
+	}
+
 	async createContribution(params: {
 		contributionType: 'correction' | 'addition' | 'newGame'
 		changes: Record<string, unknown>

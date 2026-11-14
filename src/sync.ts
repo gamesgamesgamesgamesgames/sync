@@ -238,6 +238,17 @@ async function main() {
 	//    encountered in game updates that don't have profiles yet.
 	await syncNewCompanies(igdb, atproto, state)
 
+	// 8. Queue a sweep of our own pending contributions, so media deferrals
+	//    and failed auto-accept jobs get retried once a night. Best effort: a
+	//    failure here only needs attention, it loses nothing.
+	try {
+		const jobId = await contributionClient.queueAutoAcceptSweep()
+		console.log(`[contributions] Queued auto-accept sweep ${jobId}`)
+	} catch (err) {
+		console.error('[contributions] Could not queue the auto-accept sweep:', (err as Error).message)
+		attention.push(`auto-accept sweep: ${(err as Error).message}`)
+	}
+
 	// Done
 	console.log()
 	console.log('=== Sync complete! ===')
