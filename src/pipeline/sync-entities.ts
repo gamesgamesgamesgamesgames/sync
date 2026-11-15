@@ -10,8 +10,9 @@ import type { IGDBClient } from '../igdb/client.js'
 import type { AtprotoClient } from '../atproto/client.js'
 import type { StateManager, EntityType } from '../state.js'
 import { XRPCError } from '@atproto/xrpc'
-import { ContributionRequestError, type ContributionClient } from '../contributions/client.js'
-import { syncGameViaContribution } from '../contributions/handler.js'
+import { ContributionRequestError, RecordReadError, type ContributionClient } from '../contributions/client.js'
+import { PdsResolutionError } from '../atproto/pds-resolver.js'
+import { RecordUnreadableError, syncGameViaContribution } from '../contributions/handler.js'
 import { errorLabel, prefetch } from '../helpers.js'
 import { flushBatch, type PendingRecord } from './batch.js'
 import { ConcurrencyPool } from '../concurrency.js'
@@ -81,8 +82,8 @@ export function needsAttention(result: SyncResult): boolean {
  *
  * - `permanent`: HappyView refused the request itself (a 4xx other than
  *   auth, timeout or rate limit). Recorded in `failures`; the cursor moves on.
- * - `systemic`: auth, rate limits, gateway errors (502/503/504) and network
- *   errors. They hit every entity alike, so they always hold the cursor and
+ * - `systemic`: auth, rate limits, gateway errors (502/503/504), network
+ *   errors, and a record that getGame found but that can't be read. They hit every entity alike, so they always hold the cursor and
  *   never count against one entity.
  * - `entity`: anything else, including a plain 500 (HappyView 2.17.5 answers
  *   every Lua error() with 500, so a script refusing one game looks like
@@ -97,6 +98,11 @@ export type FailureKind = 'permanent' | 'systemic' | 'entity'
 const SYSTEMIC_STATUSES = [401, 403, 408, 429, 502, 503, 504]
 
 export function classifyFailure(err: unknown): FailureKind {
+	// A broken read path (the record can't be read, its PDS can't be found or
+	// answers oddly) hits every game alike and is never a game's fault.
+	if (err instanceof RecordUnreadableError || err instanceof RecordReadError || err instanceof PdsResolutionError) {
+		return 'systemic'
+	}
 	if (err instanceof ContributionRequestError || err instanceof XRPCError) {
 		const status = err.status
 		if (SYSTEMIC_STATUSES.includes(status)) return 'systemic'

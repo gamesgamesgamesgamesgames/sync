@@ -78,3 +78,16 @@ describe('syncGameViaContribution', () => {
 		}))
 	})
 })
+
+describe('syncGameViaContribution unreadable records', () => {
+	test('throws a RecordUnreadableError, which the pipeline treats as systemic', async () => {
+		const { RecordUnreadableError } = await import('./handler.js')
+		const client = {
+			getGameByIgdbId: vi.fn(async () => ({ uri: 'at://did:web:g/games.gamesgamesgamesgames.game/a', record: { name: 'Portal' } })),
+			getGameRecord: vi.fn(async () => null),
+			getRecord: vi.fn(async () => null),
+			createContribution: vi.fn(),
+		} as unknown as ContributionClient
+		await expect(syncGameViaContribution('602', { name: 'Portal' }, client)).rejects.toBeInstanceOf(RecordUnreadableError)
+	})
+})

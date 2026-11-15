@@ -2,6 +2,18 @@ import type { ContributionClient } from './client.js'
 import { diffGameRecord, pickContributableFields } from './diff.js'
 import { contentHashRkey } from './hash.js'
 
+/**
+ * getGame found a game but its stored record could not be read. That is
+ * never the game's fault: it means the read path is broken, so it counts as
+ * systemic and is never charged to the game.
+ */
+export class RecordUnreadableError extends Error {
+	constructor(readonly uri: string, readonly igdbId: string) {
+		super(`getGame found ${uri} for IGDB ${igdbId}, but its record could not be read`)
+		this.name = 'RecordUnreadableError'
+	}
+}
+
 const CONTRIBUTION_COLLECTION = 'games.gamesgamesgamesgames.contribution'
 
 export interface ContributionSyncResult {
@@ -43,7 +55,7 @@ export async function syncGameViaContribution(
 
 	const stored = await contributionClient.getGameRecord(existing.uri)
 	if (!stored) {
-		throw new Error(`getGame found ${existing.uri} for IGDB ${igdbId}, but its record could not be read`)
+		throw new RecordUnreadableError(existing.uri, igdbId)
 	}
 
 	const changes = diffGameRecord(mappedRecord, stored.value)

@@ -1,6 +1,15 @@
 import { HappyViewNodeClient } from '@happyview/oauth-client-node'
 import { FileStorage } from './storage.js'
 import { fetchWithRetry, type RetryOptions } from './retry.js'
+import { PdsResolver } from '../atproto/pds-resolver.js'
+
+/** Reading a record from its repo's PDS failed for a reason other than "not found". */
+export class RecordReadError extends Error {
+	constructor(readonly uri: string, readonly status: number, body: string) {
+		super(`getRecord for ${uri} returned ${status}: ${body}`)
+		this.name = 'RecordReadError'
+	}
+}
 
 /** A HappyView request that came back with a non-OK status. */
 export class ContributionRequestError extends Error {
@@ -40,6 +49,8 @@ export interface ContributionClientOptions {
 	retry?: RetryOptions
 	/** Injectable for tests. Defaults to the global fetch. */
 	fetch?: typeof fetch
+	/** Finds the PDS a repo lives on. Injectable for tests. */
+	pdsResolver?: PdsResolver
 }
 
 export class ContributionClient {
@@ -49,12 +60,14 @@ export class ContributionClient {
 	private clientKey: string
 	private retry: RetryOptions
 	private fetchImpl: typeof fetch
+	private pdsResolver: PdsResolver
 
 	constructor(options: ContributionClientOptions) {
 		this.instanceUrl = options.instanceUrl
 		this.clientKey = options.clientKey
 		this.retry = options.retry ?? {}
 		this.fetchImpl = options.fetch ?? ((...args) => fetch(...args))
+		this.pdsResolver = options.pdsResolver ?? new PdsResolver({ fetch: this.fetchImpl })
 		this.hvClient = new HappyViewNodeClient({
 			instanceUrl: options.instanceUrl,
 			clientId: options.clientId,
@@ -164,22 +177,30 @@ export class ContributionClient {
 		return { uri: result.uri ?? uri, cid: result.cid, value: result.value }
 	}
 
+	/**
+	 * Read a record from the PDS its repo lives on, not from HappyView.
+	 * HappyView does not serve com.atproto.repo.getRecord: on this instance it
+	 * forwards the call to the lexicon authority, which answers 400
+	 * RecordNotFound for everything. Returns null only when the PDS says the
+	 * record does not exist; anything else throws.
+	 */
 	private async fetchRecord(repo: string, collection: string, rkey: string): Promise<unknown | null> {
-		const url = `${this.instanceUrl}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(repo)}&collection=${encodeURIComponent(collection)}&rkey=${encodeURIComponent(rkey)}`
+		const uri = `at://${repo}/${collection}/${rkey}`
+		const pds = await this.pdsResolver.resolve(repo)
+		const url = `${pds}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(repo)}&collection=${encodeURIComponent(collection)}&rkey=${encodeURIComponent(rkey)}`
 		const response = await fetchWithRetry('getRecord', () => this.fetchImpl(url, {
-			headers: { 'X-Client-Key': this.clientKey },
+			headers: { Accept: 'application/json' },
 		}), this.retry)
 
-		if (response.status === 404 || response.status === 400) {
+		if (response.ok) {
+			return await response.json()
+		}
+
+		const body = await response.text()
+		if (response.status === 404 || (response.status === 400 && /RecordNotFound/.test(body))) {
 			return null
 		}
-
-		if (!response.ok) {
-			const body = await response.text()
-			throw new ContributionRequestError('getRecord', response.status, body)
-		}
-
-		return await response.json()
+		throw new RecordReadError(uri, response.status, body)
 	}
 
 	/**

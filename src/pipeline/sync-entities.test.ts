@@ -3,7 +3,9 @@ import { existsSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { StateManager } from '../state.js'
-import { ContributionRequestError, type ContributionClient } from '../contributions/client.js'
+import { ContributionRequestError, RecordReadError, type ContributionClient } from '../contributions/client.js'
+import { RecordUnreadableError } from '../contributions/handler.js'
+import { PdsResolutionError } from '../atproto/pds-resolver.js'
 import type { IGDBClient } from '../igdb/client.js'
 import type { AtprotoClient } from '../atproto/client.js'
 import { breakerTrips, classifyFailure, errorShape, isPermanentFailure, needsAttention, syncEntityType } from './sync-entities.js'
@@ -252,6 +254,26 @@ describe('syncEntityType cursor', () => {
 		expect(state.getFailureStreak('game', '1')).toBe(0)
 	})
 
+	test('every game failing with an unreadable record never charges a game, however many nights', async () => {
+		// The 2026-11-15 failure: getGame finds the game, the record read fails.
+		const client = {
+			getGameByIgdbId: vi.fn(async (igdbId: string) => ({ uri: `at://did:web:g/games.gamesgamesgamesgames.game/${igdbId}`, record: { name: 'x' } })),
+			getGameRecord: vi.fn(async () => null),
+			getRecord: vi.fn(async () => null),
+			createContribution: vi.fn(),
+		} as unknown as ContributionClient
+		for (let n = 1; n <= 6; n++) {
+			day(n)
+			const r = await run(client, range(50))
+			expect(r.systemic).toBeGreaterThan(0)
+			expect(r.givenUp).toBe(0)
+			expect(r.cursorAdvanced).toBe(false)
+		}
+		expect(state.getFailureStreak('game', '1')).toBe(0)
+		expect(state.getFailures('game')).toEqual([])
+		expect(client.createContribution).not.toHaveBeenCalled()
+	})
+
 	test('a run that does not trip resets the trip count', async () => {
 		const cluster = skippingClient((id) => (id <= 6 ? clusterError(id) : null), (id) => id > 6)
 		day(1); await run(cluster, range(50))
@@ -418,6 +440,12 @@ describe('classifyFailure', () => {
 		[504, 'systemic'],
 	])('status %i → %s', (status, kind) => {
 		expect(classifyFailure(new ContributionRequestError('x', status, ''))).toBe(kind)
+	})
+
+	test('an unreadable record, a refused read and an unresolvable PDS are systemic', () => {
+		expect(classifyFailure(new RecordUnreadableError('at://x/g/1', '602'))).toBe('systemic')
+		expect(classifyFailure(new RecordReadError('at://x/g/1', 400, 'InvalidRequest'))).toBe('systemic')
+		expect(classifyFailure(new PdsResolutionError('did:web:x', 'no service'))).toBe('systemic')
 	})
 
 	test('network errors are systemic', () => {
