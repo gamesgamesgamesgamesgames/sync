@@ -181,6 +181,36 @@ export class ContributionClient {
 		return result as Record<string, unknown> | null
 	}
 
+	/**
+	 * Whether an allowlisted repo's PDS holds a blob, through the public
+	 * com.atproto.sync.getBlob. The body is never read. Throws on anything but
+	 * 200 or a not-found answer.
+	 */
+	async hasBlob(did: string, cid: string): Promise<boolean> {
+		if (!this.canReadRepo(did)) {
+			throw new RecordReadNotAllowedError(did)
+		}
+		const pds = await this.pdsResolver.resolve(did)
+		const url = `${pds}/xrpc/com.atproto.sync.getBlob?did=${encodeURIComponent(did)}&cid=${encodeURIComponent(cid)}`
+		const response = await fetchWithRetry('getBlob', () => this.fetchImpl(url, {
+			redirect: 'error',
+			signal: AbortSignal.timeout(SAFE_READ_TIMEOUT_MS),
+		}), this.retry)
+		const status = response.status
+		await response.body?.cancel().catch(() => undefined)
+		if (status === 200) return true
+		if (status === 404 || status === 400) return false
+		throw new RecordReadError(`at://${did}/blob/${cid}`, status, 'getBlob')
+	}
+
+	/** Whether the sync account's own PDS already holds a blob. */
+	async hasContributorBlob(cid: string): Promise<boolean> {
+		if (!this.session) {
+			throw new Error('Not authenticated — call restore() first')
+		}
+		return this.hasBlob(this.session.did, cid)
+	}
+
 	/** Whether raw records for this repo may be read from its PDS. */
 	canReadRepo(repo: string): boolean {
 		return this.readableRepos.has(repo) || this.session?.did === repo

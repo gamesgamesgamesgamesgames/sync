@@ -39,8 +39,10 @@ export interface SyncEntityConfig<T extends { id: number }> {
 	happyviewApiKey?: string
 	/** When set, games are synced via the contribution path instead of direct writes. */
 	contributionClient?: ContributionClient
-	/** Whether an IGDB image's blob is mirrored to the catalogue repo; part of correction rkeys. */
-	isImageMirrored?: (imageId: string) => boolean
+	/** Told which images' blobs the contributor's PDS turned out to lack. */
+	onMissingContributorBlobs?: (imageIds: string[]) => void
+	/** Whether an IGDB image's blob, at this CID, is mirrored to the catalogue repo; part of correction rkeys. */
+	isImageMirrored?: (imageId: string, cid: string) => boolean
 	/** Consecutive failed runs before an entity stops holding the cursor (default SYNC_MAX_FAILED_RUNS or 3). */
 	maxFailedRuns?: number
 	/** Warn when the cursor is older than this many hours (default SYNC_CURSOR_ALERT_HOURS or 72). */
@@ -385,7 +387,10 @@ export async function syncEntityType<T extends { id: number }>(
 				// Contribution path: all games go through contributions
 				if (contributionClient && record) {
 					try {
-						const syncResult = await syncGameViaContribution(key, record, contributionClient, { isImageMirrored: config.isImageMirrored })
+						const syncResult = await syncGameViaContribution(key, record, contributionClient, {
+							onMissingContributorBlobs: config.onMissingContributorBlobs,
+							isImageMirrored: config.isImageMirrored,
+						})
 
 						state.clearFailureStreak(entityType, key)
 						if (syncResult.action === 'created') {

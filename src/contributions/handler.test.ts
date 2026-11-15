@@ -1,6 +1,6 @@
 import { describe, test, expect, vi } from 'vitest'
 import { syncGameViaContribution } from './handler.js'
-import type { ContributionClient } from './client.js'
+import { ContributionRequestError, type ContributionClient } from './client.js'
 
 const GAME_URI = 'at://did:web:gamesgamesgamesgames.games/games.gamesgamesgamesgames.game/g1'
 
@@ -134,6 +134,60 @@ describe('correction rkeys', () => {
 	})
 })
 
+describe('BlobNotFound recovery', () => {
+	const media = [{ blob: { $type: 'blob', ref: { $link: 'bafyM' }, mimeType: 'image/jpeg', size: 1 }, mediaType: 'cover', igdbImageId: 'coM' }]
+	const blobNotFound = () => new ContributionRequestError('createContribution', 500,
+		'{"error":"script_error","message":"runtime error: PDS createRecord returned 400 Bad Request: {\\"error\\":\\"BlobNotFound\\",\\"message\\":\\"Could not find blob: bafyM\\"}"}')
+	const existing = () => ({
+		getGameByIgdbId: vi.fn(async () => ({ uri: GAME_URI, record: {} })),
+		getGameRecord: vi.fn(async () => ({ uri: GAME_URI, cid: 'bafyBase', value: { summary: 'old' } })),
+	})
+
+	test('forgets the media blobs and retries once without media; the other fields land', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {})
+		const onMissing = vi.fn()
+		let n = 0
+		const client = fakeClient({ ...existing(), createContribution: vi.fn(async () => { if (++n === 1) throw blobNotFound(); return { uri: 'at://x/c/2' } }) })
+		const result = await syncGameViaContribution('1', { summary: 'new', media }, client, { onMissingContributorBlobs: onMissing })
+		expect(result.action).toBe('created')
+		expect(onMissing).toHaveBeenCalledWith(['coM'])
+		expect(client.createContribution).toHaveBeenCalledTimes(2)
+		expect((client.createContribution.mock.calls[1]![0] as { changes: unknown }).changes).toEqual({ summary: 'new' })
+	})
+
+	test('a media-only change is skipped after forgetting its blobs', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {})
+		const onMissing = vi.fn()
+		const client = fakeClient({ ...existing(), createContribution: vi.fn(async () => { throw blobNotFound() }) })
+		const result = await syncGameViaContribution('1', { summary: 'old', media }, client, { onMissingContributorBlobs: onMissing })
+		expect(result.action).toBe('skipped')
+		expect(onMissing).toHaveBeenCalledWith(['coM'])
+		expect(client.createContribution).toHaveBeenCalledTimes(1)
+	})
+
+	test('retries only once', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {})
+		const client = fakeClient({ ...existing(), createContribution: vi.fn(async () => { throw blobNotFound() }) })
+		await expect(syncGameViaContribution('1', { summary: 'new', media }, client)).rejects.toBeInstanceOf(ContributionRequestError)
+		expect(client.createContribution).toHaveBeenCalledTimes(2)
+	})
+
+	test('other errors are not retried', async () => {
+		const client = fakeClient({ ...existing(), createContribution: vi.fn(async () => { throw new ContributionRequestError('createContribution', 500, 'script_error: something else') }) })
+		await expect(syncGameViaContribution('1', { summary: 'new', media }, client)).rejects.toBeInstanceOf(ContributionRequestError)
+		expect(client.createContribution).toHaveBeenCalledTimes(1)
+	})
+
+	test('a newGame retries without media too', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {})
+		let n = 0
+		const client = fakeClient({ createContribution: vi.fn(async () => { if (++n === 1) throw blobNotFound(); return { uri: 'at://x/c/3' } }) })
+		const result = await syncGameViaContribution('9', { name: 'New', applicationType: 'game', media }, client)
+		expect(result).toMatchObject({ action: 'created', contributionType: 'newGame' })
+		expect((client.createContribution.mock.calls[1]![0] as { changes: unknown }).changes).toEqual({ name: 'New', applicationType: 'game' })
+	})
+})
+
 describe('correction rkeys and mirror state', () => {
 	const media = [
 		{ blob: { $type: 'blob', ref: { $link: 'bafyA' }, mimeType: 'image/jpeg', size: 1 }, mediaType: 'cover', igdbImageId: 'coA' },
@@ -194,5 +248,38 @@ describe('mirroredMediaCids', () => {
 		expect(mirroredMediaCids(changes, (id) => id !== 'n')).toEqual(['bafyA', 'bafyZ'])
 		expect(mirroredMediaCids(changes)).toEqual([])
 		expect(mirroredMediaCids({ name: 'x' }, () => true)).toEqual([])
+	})
+})
+
+describe('CID-aware mirror state', () => {
+	const media = [
+		{ blob: { $type: 'blob', ref: { $link: 'bafyA' }, mimeType: 'image/jpeg', size: 1 }, mediaType: 'cover', igdbImageId: 'coA' },
+	]
+	const make = () => fakeClient({
+		getGameByIgdbId: vi.fn(async () => ({ uri: GAME_URI, record: {} })),
+		getGameRecord: vi.fn(async () => ({ uri: GAME_URI, cid: 'bafyBase', value: { name: 'Portal' } })),
+	})
+	const rkeyOf = (c: ReturnType<typeof make>) => (c.createContribution.mock.calls[0]![0] as { rkey: string }).rkey
+	const mirrorLedger = (entries: Record<string, string>) => {
+		const m = new Map(Object.entries(entries))
+		return {
+			m,
+			isImageMirrored: (id: string, cid: string) => m.get(id) === cid,
+		}
+	}
+
+
+
+
+	test('adopt-then-key: an entry at the old CID does not make the adopted CID count as mirrored', async () => {
+		// The ledger still has coA at the CID from before adoption; the media now carries bafyA.
+		const stale = mirrorLedger({ coA: 'bafyOld' })
+		const c = make(); const unmirrored = make(); const mirrored = make()
+		await syncGameViaContribution('1', { name: 'Portal', media }, c, stale)
+		await syncGameViaContribution('1', { name: 'Portal', media }, unmirrored, { isImageMirrored: () => false })
+		expect(rkeyOf(c)).toBe(rkeyOf(unmirrored))
+		// Once the catalogue really holds the new CID, the key changes.
+		await syncGameViaContribution('1', { name: 'Portal', media }, mirrored, mirrorLedger({ coA: 'bafyA' }))
+		expect(rkeyOf(mirrored)).not.toBe(rkeyOf(unmirrored))
 	})
 })

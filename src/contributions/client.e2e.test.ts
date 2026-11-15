@@ -12,6 +12,8 @@ import { PdsResolver } from '../atproto/pds-resolver.js'
 import { syncGameViaContribution } from './handler.js'
 
 const DID = 'did:plc:fixturegames'
+/** Blobs the fixture PDS holds for DID. */
+const PDS_BLOBS = new Set(['bafyHeld'])
 const GAME_URI = `at://${DID}/games.gamesgamesgamesgames.game/g1`
 
 interface Hit { server: string; method: string; path: string }
@@ -37,6 +39,12 @@ const send = (res: http.ServerResponse, status: number, body: unknown) => {
 
 beforeAll(async () => {
 	;[pds, pdsUrl] = await listen('pds', (_req, url, res) => {
+		if (url.pathname === '/xrpc/com.atproto.sync.getBlob') {
+			if (url.searchParams.get('did') === DID && PDS_BLOBS.has(url.searchParams.get('cid')!)) {
+				res.writeHead(200, { 'content-type': 'image/jpeg' }); return res.end(Buffer.alloc(64))
+			}
+			return send(res, 400, { error: 'BlobNotFound', message: 'Blob not found' })
+		}
 		if (url.pathname !== '/xrpc/com.atproto.repo.getRecord') return send(res, 404, { error: 'NotFound' })
 		const uri = `at://${url.searchParams.get('repo')}/${url.searchParams.get('collection')}/${url.searchParams.get('rkey')}`
 		if (uri === GAME_URI) return send(res, 200, { uri, cid: 'bafygame', value: { $type: 'games.gamesgamesgamesgames.game', name: 'Portal', summary: 'old' } })
@@ -76,6 +84,59 @@ function realClient() {
 		retry: { sleep: async () => {} },
 	})
 }
+
+describe('contributor blobs over real HTTP', () => {
+	function sessioned() {
+		const c = realClient()
+		;(c as unknown as { session: unknown }).session = { did: DID, fetchHandler: async () => new Response('{}') }
+		return c
+	}
+
+	test('hasContributorBlob asks the account\'s own PDS, never HappyView', async () => {
+		hits.length = 0
+		const c = sessioned()
+		expect(await c.hasContributorBlob('bafyHeld')).toBe(true)
+		expect(await c.hasContributorBlob('bafyMissing')).toBe(false)
+		expect(hits.filter((h) => h.server === 'happyview')).toEqual([])
+		expect(hits.filter((h) => h.server === 'pds').map((h) => h.path)).toEqual(['/xrpc/com.atproto.sync.getBlob', '/xrpc/com.atproto.sync.getBlob'])
+	})
+
+	test('every media CID in a contribution exists on the contributor PDS before createContribution is called', async () => {
+		// Built the way the sync builds it: cached blobs, one of which only the
+		// catalogue repo ever held. The mirroring uploader's pre-check asks the
+		// real fixture PDS; the one it lacks is re-uploaded (simulated by adding
+		// it to the fixture) before the contribution goes out.
+		const { MirroringBlobUploader, buildMediaItemsConcurrent } = await import('../media.js')
+		const c = sessioned()
+		const contributor = new Map<string, string>()
+		const ledger = {
+			isBlobMirrored: () => true, setBlobMirrored: () => {},
+			isBlobInContributor: (id: string, cid: string) => contributor.get(id) === cid,
+			setBlobInContributor: (id: string, cid: string) => { contributor.set(id, cid) },
+		}
+		const primary = { uploadBlob: async (_d: Uint8Array, _m: string, o?: { imageId?: string }) => {
+			const cid = o?.imageId === 'coOld' ? 'bafyOld' : 'bafyHeld'
+			PDS_BLOBS.add(cid)
+			return { ref: { $link: cid }, mimeType: 'image/jpeg', size: 64 }
+		} }
+		const uploader = new MirroringBlobUploader(primary, { uploadBlobOnce: async () => ({ ref: { $link: 'x' }, mimeType: 'image/jpeg', size: 1 }) }, ledger, c)
+		const cache = new Map([
+			['coHeld', { ref: { $link: 'bafyHeld' }, mimeType: 'image/jpeg', size: 64 }],
+			['coOld', { ref: { $link: 'bafyOld' }, mimeType: 'image/jpeg', size: 64 }],
+		])
+		PDS_BLOBS.delete('bafyOld')
+		const state = { hasBlob: (id: string) => cache.has(id), getBlob: (id: string) => cache.get(id), setBlob: () => {} }
+		const igdb = { downloadImage: async () => Buffer.alloc(64) }
+		const media = await buildMediaItemsConcurrent(
+			[{ imageId: 'coHeld', mediaType: 'cover' }, { imageId: 'coOld', mediaType: 'screenshot' }],
+			igdb as never, uploader, state as never,
+		)
+		for (const item of media) {
+			expect(await c.hasContributorBlob(item.blob.ref.$link)).toBe(true)
+		}
+		expect(uploader.allInContributor(media.map((m) => ({ imageId: m.igdbImageId!, cid: m.blob.ref.$link })))).toBe(true)
+	})
+})
 
 describe('reading records over real HTTP', () => {
 	test('getGameRecord reads from the repo\'s PDS and never asks HappyView', async () => {
