@@ -159,6 +159,12 @@ export async function syncGameViaContribution(
 
 	if (!existing) {
 		const changes = pickContributableFields(mappedRecord)
+		// acceptContribution and auto-accept refuse a newGame without one, and
+		// it would sit pending for good. A later run sends it once the type maps.
+		if (!changes.applicationType) {
+			console.warn(`  [contributions] IGDB ${igdbId} has no applicationType; not proposing it as a new game yet`)
+			return { action: 'skipped' }
+		}
 		return submit(contributionClient, { contributionType: 'newGame', changes }, options)
 	}
 
