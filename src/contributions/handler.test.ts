@@ -1,5 +1,6 @@
 import { describe, test, expect, vi } from 'vitest'
 import { syncGameViaContribution } from './handler.js'
+import { jsonToLex } from '@atproto/api'
 import { ContributionRequestError, type ContributionClient } from './client.js'
 
 const GAME_URI = 'at://did:web:gamesgamesgamesgames.games/games.gamesgamesgamesgames.game/g1'
@@ -163,6 +164,15 @@ describe('BlobNotFound recovery', () => {
 		expect(result.action).toBe('skipped')
 		expect(onMissing).toHaveBeenCalledWith(['coM'])
 		expect(client.createContribution).toHaveBeenCalledTimes(1)
+	})
+
+	test('BlobRef-shaped media still names its images when forgotten', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {})
+		const onMissing = vi.fn()
+		const decoded = jsonToLex({ media: [{ ...media[0], blob: { ...media[0]!.blob, ref: { $link: 'bafkreie6btijqtnjfflucdqdnzzseae4dclsga3wym7enzfng3awdfpdv4' } } }] }) as { media: unknown[] }
+		const client = fakeClient({ ...existing(), createContribution: vi.fn(async () => { throw blobNotFound() }) })
+		await syncGameViaContribution('1', { summary: 'old', media: decoded.media }, client, { onMissingContributorBlobs: onMissing })
+		expect(onMissing).toHaveBeenCalledWith(['coM'])
 	})
 
 	test('retries only once', async () => {

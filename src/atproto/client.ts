@@ -8,6 +8,7 @@
 import { AtpAgent } from '@atproto/api'
 import { XRPCError } from '@atproto/xrpc'
 import { countdownSleep } from '../helpers.js'
+import { toPlainJson } from './lex-json.js'
 
 export class AtprotoClient {
 	private agent: AtpAgent
@@ -176,7 +177,10 @@ export class AtprotoClient {
 		}, 'listRecords')
 	}
 
-	/** Get a record by collection and rkey. Returns null if not found. */
+	/**
+	 * Get a record by collection and rkey, as plain JSON (see toPlainJson).
+	 * Returns null if not found.
+	 */
 	async getRecord(
 		collection: string,
 		rkey: string,
@@ -188,7 +192,7 @@ export class AtprotoClient {
 					collection,
 					rkey,
 				})
-				return response.data.value as Record<string, unknown>
+				return toPlainJson(response.data.value) as Record<string, unknown>
 			}, 'getRecord')
 		} catch (err) {
 			if (err instanceof XRPCError && err.status === 404) {
