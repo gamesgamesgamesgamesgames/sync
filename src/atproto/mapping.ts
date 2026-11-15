@@ -7,6 +7,7 @@ import type { IGDBClient } from '../igdb/client.js'
 import type { AtprotoClient } from '../atproto/client.js'
 import { buildMediaItem, buildMediaItemsConcurrent } from '../media.js'
 import type { ImageTask, BlobUploader } from '../media.js'
+import { blobCid, toPlainJson } from './lex-json.js'
 import {
 	IGDB_PLATFORM_CATEGORY,
 	IGDB_WEBSITE_CATEGORY,
@@ -287,7 +288,7 @@ export function mediaUsable(
 	if (media.length === 0) return false
 	if (!uploader.allInContributor) return true
 	const refs = (media as Array<{ igdbImageId?: string; blob?: { ref?: { $link?: string } } }>)
-		.map((m) => ({ imageId: m.igdbImageId ?? '', cid: m.blob?.ref?.$link ?? '' }))
+		.map((m) => ({ imageId: m.igdbImageId ?? '', cid: blobCid(m.blob) ?? '' }))
 	const complete = media.length === tasks.length
 		&& refs.every((r) => r.imageId && r.cid)
 		&& uploader.allInContributor(refs)
@@ -485,7 +486,9 @@ export async function mapGame(
 			&& [...igdbImageIds].every((id) => existingImageIds.has(id))
 
 		if (unchanged) {
-			record.media = options.existingMedia
+			// Plain JSON, or it never equals the stored record and the catalogue's
+			// own blobs get sent as a media change.
+			record.media = toPlainJson(options.existingMedia)
 		} else if (imageTasks.length > 0) {
 			const media = await buildMediaItemsConcurrent(imageTasks, igdbClient, uploader, state)
 			if (mediaUsable(uploader, imageTasks, media, igdb.id)) record.media = media

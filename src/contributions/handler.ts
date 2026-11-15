@@ -1,6 +1,7 @@
 import { diffGameRecord, pickContributableFields } from './diff.js'
 import { contentHashRkey } from './hash.js'
 import { ContributionRequestError, type ContributionClient } from './client.js'
+import { blobCid } from '../atproto/lex-json.js'
 
 /**
  * getGame found a game but its stored record could not be read: the PDS says
@@ -47,8 +48,8 @@ function mediaRefs(changes: Record<string, unknown>): MediaRef[] {
 	const refs: MediaRef[] = []
 	for (const item of changes.media as Array<Record<string, unknown>>) {
 		const imageId = typeof item?.igdbImageId === 'string' ? item.igdbImageId : undefined
-		const cid = (item?.blob as { ref?: { $link?: unknown } } | undefined)?.ref?.$link
-		if (imageId && typeof cid === 'string') refs.push({ imageId, cid })
+		const cid = blobCid(item?.blob)
+		if (imageId && cid) refs.push({ imageId, cid })
 	}
 	return refs
 }
