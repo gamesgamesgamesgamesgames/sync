@@ -458,20 +458,48 @@ export const IGDB_AGE_RATING_ORG_MAP: Record<number, string> = {
 	7: 'acb',
 }
 
-/** IGDB age rating enum → lexicon rating string mapping */
-export const IGDB_AGE_RATING_MAP: Record<number, string> = {
-	// PEGI
-	1: 'Three', 2: 'Seven', 3: 'Twelve', 4: 'Sixteen', 5: 'Eighteen',
-	// ESRB
-	6: 'RP', 7: 'EC', 8: 'E', 9: 'E10', 10: 'T', 11: 'M', 12: 'AO',
-	// CERO
-	13: 'A', 14: 'B', 15: 'C', 16: 'D', 17: 'Z',
-	// USK
-	18: 'Zero', 19: 'Six', 20: 'Twelve', 21: 'Sixteen', 22: 'Eighteen',
-	// GRAC
-	23: 'All', 24: 'Twelve', 25: 'Fifteen', 26: 'Nineteen', 27: 'Testing',
-	// CLASS_IND
-	28: 'L', 29: 'Ten', 30: 'Twelve', 31: 'Fourteen', 32: 'Sixteen', 33: 'Eighteen',
-	// ACB
-	34: 'G', 35: 'PG', 36: 'M', 37: 'MA15', 38: 'R18', 39: 'RC',
+export interface MappedAgeRating { organization: string; rating: string }
+
+// Rating labels follow lexicon search.lua's age filters: PEGI as words
+// ("Twelve"), USK and ClassInd as plain numbers ("12"), the rest as the
+// organisation prints them. GRAC 19+ stays "Nineteen" (see
+// backfill-grac-nineteen.ts); IGDB's newer GRAC 18+ is "Eighteen".
+const ESRB = 'esrb', PEGI = 'pegi', CERO = 'cero', USK = 'usk', GRAC = 'grac', CLASS_IND = 'classInd', ACB = 'acb'
+
+/**
+ * IGDB `age_ratings.rating_category` → organisation and rating. Each id is a
+ * row of IGDB's age_rating_categories endpoint, which names its organisation,
+ * so the organisation comes from here rather than from a separate field.
+ * Checked against the live endpoint on 2026-11-15.
+ */
+export const IGDB_AGE_RATING_CATEGORY_MAP: Record<number, MappedAgeRating> = {
+	1: { organization: ESRB, rating: 'RP' }, 2: { organization: ESRB, rating: 'EC' }, 3: { organization: ESRB, rating: 'E' },
+	4: { organization: ESRB, rating: 'E10' }, 5: { organization: ESRB, rating: 'T' }, 6: { organization: ESRB, rating: 'M' },
+	7: { organization: ESRB, rating: 'AO' },
+	8: { organization: PEGI, rating: 'Three' }, 9: { organization: PEGI, rating: 'Seven' }, 10: { organization: PEGI, rating: 'Twelve' },
+	11: { organization: PEGI, rating: 'Sixteen' }, 12: { organization: PEGI, rating: 'Eighteen' },
+	13: { organization: CERO, rating: 'A' }, 14: { organization: CERO, rating: 'B' }, 15: { organization: CERO, rating: 'C' },
+	16: { organization: CERO, rating: 'D' }, 17: { organization: CERO, rating: 'Z' },
+	18: { organization: USK, rating: '0' }, 19: { organization: USK, rating: '6' }, 20: { organization: USK, rating: '12' },
+	21: { organization: USK, rating: '16' }, 22: { organization: USK, rating: '18' },
+	23: { organization: GRAC, rating: 'All' }, 24: { organization: GRAC, rating: 'Twelve' }, 25: { organization: GRAC, rating: 'Fifteen' },
+	26: { organization: GRAC, rating: 'Nineteen' }, 27: { organization: GRAC, rating: 'Testing' }, 40: { organization: GRAC, rating: 'Eighteen' },
+	28: { organization: CLASS_IND, rating: 'L' }, 29: { organization: CLASS_IND, rating: '10' }, 30: { organization: CLASS_IND, rating: '12' },
+	31: { organization: CLASS_IND, rating: '14' }, 32: { organization: CLASS_IND, rating: '16' }, 33: { organization: CLASS_IND, rating: '18' },
+	34: { organization: ACB, rating: 'G' }, 35: { organization: ACB, rating: 'PG' }, 36: { organization: ACB, rating: 'M' },
+	37: { organization: ACB, rating: 'MA15' }, 38: { organization: ACB, rating: 'R18' }, 39: { organization: ACB, rating: 'RC' },
+}
+
+/**
+ * IGDB's deprecated `age_ratings.rating` enum, used only when a rating has no
+ * `rating_category`. Its ids are numbered differently: PEGI first (1–5), then
+ * ESRB (6–12); from 13 on they line up with the categories.
+ */
+export const IGDB_LEGACY_AGE_RATING_MAP: Record<number, MappedAgeRating> = {
+	1: { organization: PEGI, rating: 'Three' }, 2: { organization: PEGI, rating: 'Seven' }, 3: { organization: PEGI, rating: 'Twelve' },
+	4: { organization: PEGI, rating: 'Sixteen' }, 5: { organization: PEGI, rating: 'Eighteen' },
+	6: { organization: ESRB, rating: 'RP' }, 7: { organization: ESRB, rating: 'EC' }, 8: { organization: ESRB, rating: 'E' },
+	9: { organization: ESRB, rating: 'E10' }, 10: { organization: ESRB, rating: 'T' }, 11: { organization: ESRB, rating: 'M' },
+	12: { organization: ESRB, rating: 'AO' },
+	...Object.fromEntries(Object.entries(IGDB_AGE_RATING_CATEGORY_MAP).filter(([id]) => Number(id) >= 13 && Number(id) <= 39)),
 }
