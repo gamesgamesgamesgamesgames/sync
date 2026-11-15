@@ -3,7 +3,9 @@ import { existsSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { StateManager } from '../state.js'
-import { ContributionRequestError, type ContributionClient } from '../contributions/client.js'
+import { ContributionRequestError, RecordReadError, type ContributionClient } from '../contributions/client.js'
+import { RecordUnreadableError } from '../contributions/handler.js'
+import { PdsResolutionError } from '../atproto/pds-resolver.js'
 import type { IGDBClient } from '../igdb/client.js'
 import type { AtprotoClient } from '../atproto/client.js'
 import { breakerTrips, classifyFailure, errorShape, isPermanentFailure, needsAttention, syncEntityType } from './sync-entities.js'
@@ -252,6 +254,50 @@ describe('syncEntityType cursor', () => {
 		expect(state.getFailureStreak('game', '1')).toBe(0)
 	})
 
+	/** getGame finds every game; the stored-record read fails for the ids in `unreadable`. */
+	function readClient(unreadable: (id: number) => boolean): ContributionClient {
+		return {
+			getGameByIgdbId: vi.fn(async (igdbId: string) => ({ uri: `at://did:web:g/games.gamesgamesgamesgames.game/${igdbId}`, record: {} })),
+			getGameRecord: vi.fn(async (uri: string) => {
+				const id = Number(uri.split('/').pop())
+				return unreadable(id) ? null : { uri, cid: `bafy${id}`, value: { name: 'old' } }
+			}),
+			getRecord: vi.fn(async () => null),
+			canReadRepo: vi.fn(() => true),
+			createContribution: vi.fn(async () => ({ uri: 'at://x/c/1' })),
+		} as unknown as ContributionClient
+	}
+
+	test('one unreadable game among many is charged, and after 3 runs the cursor moves past it', async () => {
+		const client = readClient((id) => id === 7)
+		for (let n = 1; n <= 2; n++) {
+			day(n)
+			const r = await run(client, range(50))
+			expect(r.systemic).toBe(0)
+			expect(r.cursorAdvanced).toBe(false)
+			expect(state.getFailureStreak('game', '7')).toBe(n)
+		}
+		day(3)
+		const third = await run(client, range(50))
+		expect(third.givenUp).toBe(1)
+		expect(third.cursorAdvanced).toBe(true)
+		expect(state.getFailures('game')).toEqual(['7'])
+	})
+
+	test('every game unreadable (a broken read path) trips the breaker, and no game is charged while it holds', async () => {
+		const client = readClient(() => true)
+		for (let n = 1; n <= 3; n++) {
+			day(n)
+			const r = await run(client, range(50))
+			expect(r.systemic).toBe(1)
+			expect(r.givenUp).toBe(0)
+			expect(r.cursorAdvanced).toBe(false)
+		}
+		expect(state.getFailureStreak('game', '1')).toBe(0)
+		expect(state.getFailures('game')).toEqual([])
+		expect(client.createContribution).not.toHaveBeenCalled()
+	})
+
 	test('a run that does not trip resets the trip count', async () => {
 		const cluster = skippingClient((id) => (id <= 6 ? clusterError(id) : null), (id) => id > 6)
 		day(1); await run(cluster, range(50))
@@ -418,6 +464,19 @@ describe('classifyFailure', () => {
 		[504, 'systemic'],
 	])('status %i → %s', (status, kind) => {
 		expect(classifyFailure(new ContributionRequestError('x', status, ''))).toBe(kind)
+	})
+
+	test('record-read failures: transport trouble is systemic, a bad record or DID is the game\'s', () => {
+		expect(classifyFailure(new RecordUnreadableError('at://x/g/1', '602'))).toBe('entity')
+		expect(classifyFailure(new RecordReadError('at://x/g/1', 400, 'InvalidRequest: Could not find repo'))).toBe('entity')
+		expect(classifyFailure(new RecordReadError('at://x/g/1', 0, 'response exceeds the cap'))).toBe('entity')
+		expect(classifyFailure(new RecordReadError('at://x/g/1', 503, 'Service Unavailable'))).toBe('systemic')
+		expect(classifyFailure(new RecordReadError('at://x/g/1', 429, 'RateLimited'))).toBe('systemic')
+		expect(classifyFailure(new PdsResolutionError('did:web:x', 'no atproto_pds service'))).toBe('entity')
+		expect(classifyFailure(new PdsResolutionError('did:plc:x', 'returned 410'))).toBe('entity')
+		expect(classifyFailure(new PdsResolutionError('did:web:x', 'fetch failed', true))).toBe('systemic')
+		const timeout = new Error('The operation was aborted due to timeout'); timeout.name = 'TimeoutError'
+		expect(classifyFailure(timeout)).toBe('systemic')
 	})
 
 	test('network errors are systemic', () => {

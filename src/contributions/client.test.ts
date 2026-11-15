@@ -1,12 +1,13 @@
 import { describe, test, expect, vi } from 'vitest'
-import { ContributionClient, ContributionRequestError } from './client.js'
+import { ContributionClient, ContributionRequestError, RecordReadError, RecordReadNotAllowedError } from './client.js'
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
 	return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } })
 }
 
-function client(fetchImpl: typeof fetch) {
+function client(fetchImpl: typeof fetch, readableRepos: string[] = ['did:web:x.test']) {
 	return new ContributionClient({
+		readableRepos,
 		instanceUrl: 'https://hv.test',
 		clientId: 'https://client.test/metadata.json',
 		clientKey: 'hvc_test',
@@ -57,20 +58,87 @@ describe('ContributionClient.getGameByIgdbId', () => {
 })
 
 describe('ContributionClient.getGameRecord', () => {
-	test('reads the stored record for the URI from getRecord', async () => {
-		const fetchImpl = vi.fn(async (_url: string) => json(200, { uri: 'at://did:web:x/games.gamesgamesgamesgames.game/a', cid: 'bafy', value: { name: 'Portal' } }))
-		const rec = await client(fetchImpl as unknown as typeof fetch).getGameRecord('at://did:web:x/games.gamesgamesgamesgames.game/a')
-		expect(rec).toEqual({ uri: 'at://did:web:x/games.gamesgamesgamesgames.game/a', cid: 'bafy', value: { name: 'Portal' } })
-		const url = new URL(fetchImpl.mock.calls[0][0])
-		expect(url.pathname).toBe('/xrpc/com.atproto.repo.getRecord')
-		expect(url.searchParams.get('repo')).toBe('did:web:x')
-		expect(url.searchParams.get('collection')).toBe('games.gamesgamesgamesgames.game')
-		expect(url.searchParams.get('rkey')).toBe('a')
+	const DID_DOC = {
+		id: 'did:web:x.test',
+		service: [{ id: '#atproto_pds', type: 'AtprotoPersonalDataServer', serviceEndpoint: 'https://pds.x.test' }],
+	}
+
+	/** Routes by host: the DID document, the repo's PDS, and HappyView (which must not be asked). */
+	function routed(pds: (url: URL) => Response) {
+		return vi.fn(async (input: string) => {
+			const url = new URL(input)
+			if (url.host === 'x.test' && url.pathname === '/.well-known/did.json') return json(200, DID_DOC)
+			if (url.host === 'pds.x.test') return pds(url)
+			if (url.host === 'hv.test' && url.pathname === '/xrpc/com.atproto.repo.getRecord') {
+				// What HappyView answered on 2026-11-15 for every record.
+				return json(400, { error: 'RecordNotFound', message: 'Could not locate record' })
+			}
+			throw new Error(`unexpected request to ${input}`)
+		})
+	}
+
+	test('reads the stored record from the repo\'s own PDS, not from HappyView', async () => {
+		const fetchImpl = routed((url) => {
+			expect(url.pathname).toBe('/xrpc/com.atproto.repo.getRecord')
+			expect(url.searchParams.get('repo')).toBe('did:web:x.test')
+			expect(url.searchParams.get('collection')).toBe('games.gamesgamesgamesgames.game')
+			expect(url.searchParams.get('rkey')).toBe('a')
+			return json(200, { uri: 'at://did:web:x.test/games.gamesgamesgamesgames.game/a', cid: 'bafy', value: { name: 'Portal' } })
+		})
+		const rec = await client(fetchImpl as unknown as typeof fetch).getGameRecord('at://did:web:x.test/games.gamesgamesgamesgames.game/a')
+		expect(rec).toEqual({ uri: 'at://did:web:x.test/games.gamesgamesgamesgames.game/a', cid: 'bafy', value: { name: 'Portal' } })
+		expect(fetchImpl.mock.calls.some(([u]) => new URL(u as string).host === 'hv.test')).toBe(false)
 	})
 
-	test('returns null when the record is gone', async () => {
-		const fetchImpl = vi.fn(async () => json(400, { error: 'RecordNotFound' }))
-		expect(await client(fetchImpl as unknown as typeof fetch).getGameRecord('at://did:web:x/games.gamesgamesgamesgames.game/a')).toBeNull()
+	test('returns null when the PDS says RecordNotFound', async () => {
+		const fetchImpl = routed(() => json(400, { error: 'RecordNotFound', message: 'Could not locate record' }))
+		expect(await client(fetchImpl as unknown as typeof fetch).getGameRecord('at://did:web:x.test/games.gamesgamesgamesgames.game/a')).toBeNull()
+	})
+
+	test('any other refusal throws a RecordReadError instead of passing for "not found"', async () => {
+		const fetchImpl = routed(() => json(400, { error: 'InvalidRequest', message: 'Could not find repo' }))
+		const err = await client(fetchImpl as unknown as typeof fetch).getGameRecord('at://did:web:x.test/games.gamesgamesgamesgames.game/a').catch((e) => e)
+		expect(err).toBeInstanceOf(RecordReadError)
+		expect(err.status).toBe(400)
+	})
+
+	test('a repo that is not allowlisted is refused before any request', async () => {
+		const fetchImpl = vi.fn(async () => json(200, {}))
+		const err = await client(fetchImpl as unknown as typeof fetch, []).getGameRecord('at://did:web:evil.test/games.gamesgamesgamesgames.game/a').catch((e) => e)
+		expect(err).toBeInstanceOf(RecordReadNotAllowedError)
+		expect(fetchImpl).not.toHaveBeenCalled()
+	})
+
+	test('reads refuse redirects and carry a timeout', async () => {
+		const fetchImpl = routed(() => json(200, { uri: 'u', value: {} }))
+		await client(fetchImpl as unknown as typeof fetch).getGameRecord('at://did:web:x.test/games.gamesgamesgamesgames.game/a')
+		for (const [, init] of fetchImpl.mock.calls as unknown as Array<[string, RequestInit]>) {
+			expect(init.redirect).toBe('error')
+			expect(init.signal).toBeInstanceOf(AbortSignal)
+		}
+	})
+
+	test('an oversized record response is refused', async () => {
+		const big = JSON.stringify({ uri: 'u', value: { blob: 'x'.repeat(3 * 1024 * 1024) } })
+		const fetchImpl = routed(() => new Response(big, { status: 200, headers: { 'content-type': 'application/json' } }))
+		const err = await client(fetchImpl as unknown as typeof fetch).getGameRecord('at://did:web:x.test/games.gamesgamesgamesgames.game/a').catch((e) => e)
+		expect(err).toBeInstanceOf(RecordReadError)
+		expect(err.status).toBe(0)
+	})
+
+	test('the own-contribution dedupe reads from the sync account\'s PDS too', async () => {
+		const fetchImpl = vi.fn(async (input: string) => {
+			const url = new URL(input)
+			if (url.host === 'plc.directory') {
+				return json(200, { id: 'did:plc:sync', service: [{ id: '#atproto_pds', type: 'AtprotoPersonalDataServer', serviceEndpoint: 'https://pds.sync.test' }] })
+			}
+			if (url.host === 'pds.sync.test') return json(200, { uri: 'at://did:plc:sync/games.gamesgamesgamesgames.contribution/h', value: {} })
+			throw new Error(`unexpected request to ${input}`)
+		})
+		const c = client(fetchImpl as unknown as typeof fetch)
+		;(c as unknown as { session: unknown }).session = { did: 'did:plc:sync', fetchHandler: vi.fn() }
+		expect(await c.getRecord('games.gamesgamesgamesgames.contribution', 'h')).not.toBeNull()
+		expect(fetchImpl.mock.calls.map(([u]) => new URL(u as string).host)).toEqual(['plc.directory', 'pds.sync.test'])
 	})
 })
 

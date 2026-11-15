@@ -1,6 +1,29 @@
 import { HappyViewNodeClient } from '@happyview/oauth-client-node'
 import { FileStorage } from './storage.js'
 import { fetchWithRetry, type RetryOptions } from './retry.js'
+import { PdsResolver, SAFE_READ_TIMEOUT_MS, readCapped } from '../atproto/pds-resolver.js'
+
+const MAX_RECORD_BYTES = 2 * 1024 * 1024
+
+/**
+ * Reading a record from its repo's PDS failed for a reason other than "not
+ * found". `status` is the HTTP status, or 0 when the response itself was
+ * refused (too large, not JSON).
+ */
+export class RecordReadError extends Error {
+	constructor(readonly uri: string, readonly status: number, body: string) {
+		super(`getRecord for ${uri} returned ${status}: ${body.slice(0, 300)}`)
+		this.name = 'RecordReadError'
+	}
+}
+
+/** The repo is not one this client may read raw records from. */
+export class RecordReadNotAllowedError extends Error {
+	constructor(readonly repo: string) {
+		super(`raw reads from ${repo} are not allowed`)
+		this.name = 'RecordReadNotAllowedError'
+	}
+}
 
 /** A HappyView request that came back with a non-OK status. */
 export class ContributionRequestError extends Error {
@@ -40,6 +63,14 @@ export interface ContributionClientOptions {
 	retry?: RetryOptions
 	/** Injectable for tests. Defaults to the global fetch. */
 	fetch?: typeof fetch
+	/** Finds the PDS a repo lives on. Injectable for tests. */
+	pdsResolver?: PdsResolver
+	/**
+	 * Repos (DIDs) whose records may be read straight from their PDS. The
+	 * session's own DID is always allowed once restored. Anything else is
+	 * refused, so a DID document can't point these reads at arbitrary hosts.
+	 */
+	readableRepos?: string[]
 }
 
 export class ContributionClient {
@@ -49,12 +80,16 @@ export class ContributionClient {
 	private clientKey: string
 	private retry: RetryOptions
 	private fetchImpl: typeof fetch
+	private pdsResolver: PdsResolver
+	private readableRepos: Set<string>
 
 	constructor(options: ContributionClientOptions) {
 		this.instanceUrl = options.instanceUrl
 		this.clientKey = options.clientKey
 		this.retry = options.retry ?? {}
 		this.fetchImpl = options.fetch ?? ((...args) => fetch(...args))
+		this.pdsResolver = options.pdsResolver ?? new PdsResolver({ fetch: this.fetchImpl })
+		this.readableRepos = new Set((options.readableRepos ?? []).filter(Boolean))
 		this.hvClient = new HappyViewNodeClient({
 			instanceUrl: options.instanceUrl,
 			clientId: options.clientId,
@@ -146,6 +181,11 @@ export class ContributionClient {
 		return result as Record<string, unknown> | null
 	}
 
+	/** Whether raw records for this repo may be read from its PDS. */
+	canReadRepo(repo: string): boolean {
+		return this.readableRepos.has(repo) || this.session?.did === repo
+	}
+
 	/**
 	 * Fetch the stored game record behind a URI. getGame's response is hydrated
 	 * for display (release platform names and so on), so diffing against it
@@ -164,22 +204,45 @@ export class ContributionClient {
 		return { uri: result.uri ?? uri, cid: result.cid, value: result.value }
 	}
 
+	/**
+	 * Read a record from the PDS its repo lives on, not from HappyView.
+	 * HappyView does not serve com.atproto.repo.getRecord: on this instance it
+	 * forwards the call to the lexicon authority, which answers 400
+	 * RecordNotFound for everything. Returns null only when the PDS says the
+	 * record does not exist; anything else throws.
+	 */
 	private async fetchRecord(repo: string, collection: string, rkey: string): Promise<unknown | null> {
-		const url = `${this.instanceUrl}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(repo)}&collection=${encodeURIComponent(collection)}&rkey=${encodeURIComponent(rkey)}`
+		const uri = `at://${repo}/${collection}/${rkey}`
+		if (!this.canReadRepo(repo)) {
+			throw new RecordReadNotAllowedError(repo)
+		}
+		const pds = await this.pdsResolver.resolve(repo)
+		const url = `${pds}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(repo)}&collection=${encodeURIComponent(collection)}&rkey=${encodeURIComponent(rkey)}`
 		const response = await fetchWithRetry('getRecord', () => this.fetchImpl(url, {
-			headers: { 'X-Client-Key': this.clientKey },
+			headers: { Accept: 'application/json' },
+			redirect: 'error',
+			signal: AbortSignal.timeout(SAFE_READ_TIMEOUT_MS),
 		}), this.retry)
 
-		if (response.status === 404 || response.status === 400) {
+		let body: string
+		try {
+			body = await readCapped(response, MAX_RECORD_BYTES)
+		} catch (err) {
+			throw new RecordReadError(uri, 0, (err as Error).message)
+		}
+
+		if (response.ok) {
+			try {
+				return JSON.parse(body)
+			} catch {
+				throw new RecordReadError(uri, 0, 'response is not JSON')
+			}
+		}
+
+		if (response.status === 404 || (response.status === 400 && /RecordNotFound/.test(body))) {
 			return null
 		}
-
-		if (!response.ok) {
-			const body = await response.text()
-			throw new ContributionRequestError('getRecord', response.status, body)
-		}
-
-		return await response.json()
+		throw new RecordReadError(uri, response.status, body)
 	}
 
 	/**

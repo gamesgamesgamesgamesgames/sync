@@ -80,6 +80,9 @@ async function main() {
 		clientId: HAPPYVIEW_CLIENT_ID,
 		clientKey: HAPPYVIEW_CLIENT_KEY,
 		clientSecret: HAPPYVIEW_CLIENT_SECRET,
+		// Raw records are read straight from the catalogue's PDS (and our own,
+		// which restore() adds). No other repo is read.
+		readableRepos: process.env.PENTARACT_DID ? [process.env.PENTARACT_DID] : [],
 	})
 	await contributionClient.restore(IGDB_ATPROTO_DID)
 

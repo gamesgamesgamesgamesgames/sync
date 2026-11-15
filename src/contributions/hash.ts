@@ -15,7 +15,13 @@ function stableStringify(value: unknown): string {
 	return '{' + entries.join(',') + '}'
 }
 
-export function contentHashRkey(changes: Record<string, unknown>): string {
-	const serialized = stableStringify(changes)
+/**
+ * A record key derived from the contribution's content, so resubmitting the
+ * same contribution is a no-op. Corrections pass the CID of the record they
+ * were diffed against, so the same diff against a different base gets a new
+ * key. newGame contributions have no base.
+ */
+export function contentHashRkey(changes: Record<string, unknown>, baseCid?: string): string {
+	const serialized = baseCid === undefined ? stableStringify(changes) : stableStringify({ base: baseCid, changes })
 	return createHash('sha256').update(serialized).digest('hex').slice(0, 32)
 }

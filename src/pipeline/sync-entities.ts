@@ -10,8 +10,9 @@ import type { IGDBClient } from '../igdb/client.js'
 import type { AtprotoClient } from '../atproto/client.js'
 import type { StateManager, EntityType } from '../state.js'
 import { XRPCError } from '@atproto/xrpc'
-import { ContributionRequestError, type ContributionClient } from '../contributions/client.js'
-import { syncGameViaContribution } from '../contributions/handler.js'
+import { ContributionRequestError, RecordReadError, type ContributionClient } from '../contributions/client.js'
+import { PdsResolutionError } from '../atproto/pds-resolver.js'
+import { RecordUnreadableError, syncGameViaContribution } from '../contributions/handler.js'
 import { errorLabel, prefetch } from '../helpers.js'
 import { flushBatch, type PendingRecord } from './batch.js'
 import { ConcurrencyPool } from '../concurrency.js'
@@ -81,8 +82,8 @@ export function needsAttention(result: SyncResult): boolean {
  *
  * - `permanent`: HappyView refused the request itself (a 4xx other than
  *   auth, timeout or rate limit). Recorded in `failures`; the cursor moves on.
- * - `systemic`: auth, rate limits, gateway errors (502/503/504) and network
- *   errors. They hit every entity alike, so they always hold the cursor and
+ * - `systemic`: auth, rate limits, gateway errors (502/503/504), network
+ *   errors and timeouts, including those reading a game's stored record. They hit every entity alike, so they always hold the cursor and
  *   never count against one entity.
  * - `entity`: anything else, including a plain 500 (HappyView 2.17.5 answers
  *   every Lua error() with 500, so a script refusing one game looks like
@@ -97,6 +98,23 @@ export type FailureKind = 'permanent' | 'systemic' | 'entity'
 const SYSTEMIC_STATUSES = [401, 403, 408, 429, 502, 503, 504]
 
 export function classifyFailure(err: unknown): FailureKind {
+	// Reading a game's stored record: only transport trouble (network,
+	// timeouts, 5xx or 429 after retries, a PDS that can't be reached) is
+	// systemic. A record the PDS says isn't there, a 4xx, or a DID that won't
+	// resolve (404, 410, tombstone, no PDS service) is that game's problem, so
+	// one bad record can't pin the cursor. A whole-path outage like
+	// 2026-11-15's still trips the breaker through its ratio and same-error
+	// rules.
+	if (err instanceof RecordUnreadableError) return 'entity'
+	if (err instanceof RecordReadError) {
+		return err.status >= 500 || err.status === 429 ? 'systemic' : 'entity'
+	}
+	if (err instanceof PdsResolutionError) {
+		return err.transient ? 'systemic' : 'entity'
+	}
+	if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+		return 'systemic'
+	}
 	if (err instanceof ContributionRequestError || err instanceof XRPCError) {
 		const status = err.status
 		if (SYSTEMIC_STATUSES.includes(status)) return 'systemic'

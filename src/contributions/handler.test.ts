@@ -10,6 +10,7 @@ function fakeClient(overrides: Partial<Record<keyof ContributionClient, unknown>
 		getGameRecord: vi.fn(async () => null),
 		getRecord: vi.fn(async () => null),
 		createContribution: vi.fn(async () => ({ uri: 'at://did:plc:scraper/games.gamesgamesgamesgames.contribution/x' })),
+		canReadRepo: vi.fn((did: string) => did === 'did:web:gamesgamesgamesgames.games'),
 		...overrides,
 	} as unknown as ContributionClient & {
 		createContribution: ReturnType<typeof vi.fn>
@@ -76,5 +77,59 @@ describe('syncGameViaContribution', () => {
 			contributionType: 'newGame',
 			changes: { name: 'Brand New', applicationType: 'game', externalIds: { igdb: '9' } },
 		}))
+	})
+})
+
+describe('syncGameViaContribution unreadable records and owners', () => {
+	test('a game whose record the PDS cannot find throws a RecordUnreadableError', async () => {
+		const { RecordUnreadableError } = await import('./handler.js')
+		const client = fakeClient({ getGameByIgdbId: vi.fn(async () => ({ uri: GAME_URI, record: { name: 'Portal' } })) })
+		await expect(syncGameViaContribution('602', { name: 'Portal' }, client)).rejects.toBeInstanceOf(RecordUnreadableError)
+	})
+
+	test('a game in a repo we may not read is skipped without any read', async () => {
+		const owned = 'at://did:plc:studio/games.gamesgamesgamesgames.game/s1'
+		const client = fakeClient({ getGameByIgdbId: vi.fn(async () => ({ uri: owned, record: { name: 'Owned' } })) })
+		const result = await syncGameViaContribution('9', { name: 'Owned', summary: 'x' }, client)
+		expect(result.action).toBe('skipped')
+		expect(client.getGameRecord).not.toHaveBeenCalled()
+		expect(client.createContribution).not.toHaveBeenCalled()
+	})
+})
+
+describe('correction rkeys', () => {
+	const changesFor = (client: { createContribution: ReturnType<typeof vi.fn> }) => client.createContribution.mock.calls[0]![0] as { rkey: string; changes: unknown }
+
+	test('the same diff against a different base gets a different rkey', async () => {
+		const a = fakeClient({
+			getGameByIgdbId: vi.fn(async () => ({ uri: GAME_URI, record: {} })),
+			getGameRecord: vi.fn(async () => ({ uri: GAME_URI, cid: 'bafyBaseOne', value: { name: 'Portal', summary: 'old' } })),
+		})
+		const b = fakeClient({
+			getGameByIgdbId: vi.fn(async () => ({ uri: GAME_URI, record: {} })),
+			getGameRecord: vi.fn(async () => ({ uri: GAME_URI, cid: 'bafyBaseTwo', value: { name: 'Portal', summary: 'old' } })),
+		})
+		await syncGameViaContribution('1', { name: 'Portal', summary: 'new' }, a)
+		await syncGameViaContribution('1', { name: 'Portal', summary: 'new' }, b)
+		expect(changesFor(a).changes).toEqual(changesFor(b).changes)
+		expect(changesFor(a).rkey).not.toBe(changesFor(b).rkey)
+	})
+
+	test('the same diff against the same base keeps its rkey, so a rerun dedupes', async () => {
+		const make = () => fakeClient({
+			getGameByIgdbId: vi.fn(async () => ({ uri: GAME_URI, record: {} })),
+			getGameRecord: vi.fn(async () => ({ uri: GAME_URI, cid: 'bafyBase', value: { summary: 'old' } })),
+		})
+		const a = make(); const b = make()
+		await syncGameViaContribution('1', { summary: 'new' }, a)
+		await syncGameViaContribution('1', { summary: 'new' }, b)
+		expect(changesFor(a).rkey).toBe(changesFor(b).rkey)
+	})
+
+	test('newGame rkeys are the plain content hash', async () => {
+		const { contentHashRkey } = await import('./hash.js')
+		const client = fakeClient()
+		await syncGameViaContribution('9', { name: 'Brand New', applicationType: 'game' }, client)
+		expect(changesFor(client).rkey).toBe(contentHashRkey({ name: 'Brand New', applicationType: 'game' }))
 	})
 })

@@ -2,6 +2,18 @@ import type { ContributionClient } from './client.js'
 import { diffGameRecord, pickContributableFields } from './diff.js'
 import { contentHashRkey } from './hash.js'
 
+/**
+ * getGame found a game but its stored record could not be read. That is
+ * never the game's fault: it means the read path is broken, so it counts as
+ * systemic and is never charged to the game.
+ */
+export class RecordUnreadableError extends Error {
+	constructor(readonly uri: string, readonly igdbId: string) {
+		super(`getGame found ${uri} for IGDB ${igdbId}, but its record could not be read`)
+		this.name = 'RecordUnreadableError'
+	}
+}
+
 const CONTRIBUTION_COLLECTION = 'games.gamesgamesgamesgames.contribution'
 
 export interface ContributionSyncResult {
@@ -41,9 +53,17 @@ export async function syncGameViaContribution(
 		return { action: 'created', contributionType: 'newGame', uri: result.uri }
 	}
 
+	// Raw reads only go to repos we trust (the catalogue and our own). A game
+	// in anyone else's repo is owner-held, which auto-accept skips anyway, so
+	// there is nothing to diff it for.
+	const ownerDid = existing.uri.match(/^at:\/\/([^/]+)\//)?.[1]
+	if (!ownerDid || !contributionClient.canReadRepo(ownerDid)) {
+		return { action: 'skipped' }
+	}
+
 	const stored = await contributionClient.getGameRecord(existing.uri)
 	if (!stored) {
-		throw new Error(`getGame found ${existing.uri} for IGDB ${igdbId}, but its record could not be read`)
+		throw new RecordUnreadableError(existing.uri, igdbId)
 	}
 
 	const changes = diffGameRecord(mappedRecord, stored.value)
@@ -52,7 +72,10 @@ export async function syncGameViaContribution(
 		return { action: 'skipped' }
 	}
 
-	const rkey = contentHashRkey(changes)
+	// The rkey covers the base record too: the same diff against a changed
+	// base (media given up at the deferral cap, IGDB restoring a reverted
+	// field) is a new contribution, not a duplicate of the old one.
+	const rkey = contentHashRkey(changes, stored.cid)
 	const existingRecord = await contributionClient.getRecord(CONTRIBUTION_COLLECTION, rkey)
 	if (existingRecord) {
 		return { action: 'skipped' }
