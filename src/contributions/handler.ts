@@ -30,10 +30,35 @@ export interface ContributionSyncResult {
  * 3. If found → diff the mapped record against the stored game record (not
  *    getGame's hydrated view) and create a correction if anything changed.
  */
+export interface SyncGameOptions {
+	/** Whether an IGDB image's blob is known to be in the catalogue repo (blob_mirrors). */
+	isImageMirrored?: (imageId: string) => boolean
+}
+
+/**
+ * The CIDs of the media in `changes` whose blobs are known to be mirrored to
+ * the catalogue repo, sorted. Part of a correction's rkey: a media change that
+ * auto-accept gave up on (its blobs were missing) comes back with the same
+ * base and the same changes, and would otherwise reuse the old rkey and be
+ * skipped forever. Once mirroring lands its blobs, this list changes and the
+ * contribution gets a fresh rkey.
+ */
+export function mirroredMediaCids(changes: Record<string, unknown>, isImageMirrored?: (imageId: string) => boolean): string[] {
+	if (!isImageMirrored || !Array.isArray(changes.media)) return []
+	const cids: string[] = []
+	for (const item of changes.media as Array<Record<string, unknown>>) {
+		const imageId = typeof item?.igdbImageId === 'string' ? item.igdbImageId : undefined
+		const cid = (item?.blob as { ref?: { $link?: unknown } } | undefined)?.ref?.$link
+		if (imageId && typeof cid === 'string' && isImageMirrored(imageId)) cids.push(cid)
+	}
+	return [...new Set(cids)].sort()
+}
+
 export async function syncGameViaContribution(
 	igdbId: string,
 	mappedRecord: Record<string, unknown>,
 	contributionClient: ContributionClient,
+	options: SyncGameOptions = {},
 ): Promise<ContributionSyncResult> {
 	const existing = await contributionClient.getGameByIgdbId(igdbId)
 
@@ -75,7 +100,7 @@ export async function syncGameViaContribution(
 	// The rkey covers the base record too: the same diff against a changed
 	// base (media given up at the deferral cap, IGDB restoring a reverted
 	// field) is a new contribution, not a duplicate of the old one.
-	const rkey = contentHashRkey(changes, stored.cid)
+	const rkey = contentHashRkey(changes, stored.cid, mirroredMediaCids(changes, options.isImageMirrored))
 	const existingRecord = await contributionClient.getRecord(CONTRIBUTION_COLLECTION, rkey)
 	if (existingRecord) {
 		return { action: 'skipped' }

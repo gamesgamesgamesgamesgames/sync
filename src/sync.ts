@@ -162,6 +162,7 @@ async function main() {
 	const gameConfig: SyncEntityConfig<IGDBGame> = {
 		entityType: 'game',
 		contributionClient,
+		isImageMirrored: (imageId) => state.isBlobMirrored(imageId),
 		igdbEndpoint: 'games',
 		igdbFields: [
 			'fields name, summary, storyline, slug, category, game_type.type,',
