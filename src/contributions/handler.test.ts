@@ -251,7 +251,7 @@ describe('mirroredMediaCids', () => {
 	})
 })
 
-describe('catalogue pre-check and CID-aware mirror state', () => {
+describe('CID-aware mirror state', () => {
 	const media = [
 		{ blob: { $type: 'blob', ref: { $link: 'bafyA' }, mimeType: 'image/jpeg', size: 1 }, mediaType: 'cover', igdbImageId: 'coA' },
 	]
@@ -265,38 +265,11 @@ describe('catalogue pre-check and CID-aware mirror state', () => {
 		return {
 			m,
 			isImageMirrored: (id: string, cid: string) => m.get(id) === cid,
-			onCatalogueBlobMissing: vi.fn((id: string) => { m.delete(id) }),
 		}
 	}
 
-	test('a 404 from the catalogue clears the entry before the rkey is hashed', async () => {
-		vi.spyOn(console, 'warn').mockImplementation(() => {})
-		const l = mirrorLedger({ coA: 'bafyA' })
-		const checkCatalogueBlob = vi.fn(async () => false)
-		const c = make(); const plain = make()
-		await syncGameViaContribution('1', { name: 'Portal', media }, c, { ...l, checkCatalogueBlob })
-		await syncGameViaContribution('1', { name: 'Portal', media }, plain, { isImageMirrored: () => false })
-		expect(checkCatalogueBlob).toHaveBeenCalledWith('bafyA')
-		expect(l.onCatalogueBlobMissing).toHaveBeenCalledWith('coA')
-		expect(rkeyOf(c)).toBe(rkeyOf(plain))
-	})
 
-	test('a confirmed or unknown catalogue answer keeps the mirrored CID in the key', async () => {
-		for (const answer of [true, undefined]) {
-			const l = mirrorLedger({ coA: 'bafyA' })
-			const c = make(); const unmirrored = make()
-			await syncGameViaContribution('1', { name: 'Portal', media }, c, { ...l, checkCatalogueBlob: async () => answer })
-			await syncGameViaContribution('1', { name: 'Portal', media }, unmirrored, { isImageMirrored: () => false })
-			expect(l.onCatalogueBlobMissing).not.toHaveBeenCalled()
-			expect(rkeyOf(c)).not.toBe(rkeyOf(unmirrored))
-		}
-	})
 
-	test('media not recorded as mirrored is not checked', async () => {
-		const checkCatalogueBlob = vi.fn(async () => true)
-		await syncGameViaContribution('1', { name: 'Portal', media }, make(), { ...mirrorLedger({}), checkCatalogueBlob })
-		expect(checkCatalogueBlob).not.toHaveBeenCalled()
-	})
 
 	test('adopt-then-key: an entry at the old CID does not make the adopted CID count as mirrored', async () => {
 		// The ledger still has coA at the CID from before adoption; the media now carries bafyA.

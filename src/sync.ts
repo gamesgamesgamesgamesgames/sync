@@ -164,15 +164,6 @@ async function main() {
 		contributionClient,
 		onMissingContributorBlobs: (imageIds) => imageIds.forEach((id) => state.clearBlobInContributor(id)),
 		isImageMirrored: (imageId, cid) => state.isBlobMirrored(imageId, cid),
-		checkCatalogueBlob: async (cid) => {
-			try {
-				return await contributionClient.hasBlob(process.env.PENTARACT_DID!, cid)
-			} catch (err) {
-				console.warn(`[media] Could not check blob ${cid} on the catalogue repo:`, (err as Error).message)
-				return undefined
-			}
-		},
-		onCatalogueBlobMissing: (imageId) => state.clearBlobMirrored(imageId),
 		igdbEndpoint: 'games',
 		igdbFields: [
 			'fields name, summary, storyline, slug, category, game_type.type,',

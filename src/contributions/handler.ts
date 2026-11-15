@@ -30,12 +30,14 @@ export interface SyncGameOptions {
 	 * claiming those blobs are there and a later run copies them again.
 	 */
 	onMissingContributorBlobs?: (imageIds: string[]) => void
-	/** Whether this image's blob, at this CID, is recorded as mirrored to the catalogue repo. */
+	/**
+	 * Whether this image's blob, at this CID, is recorded as mirrored to the
+	 * catalogue repo. The ledger is only written when the catalogue's upload
+	 * returned that exact CID, which is trusted as is: the catalogue runs the
+	 * reference PDS, whose sync.getBlob answers BlobNotFound for blobs no record
+	 * references yet, so it can't confirm a fresh mirror.
+	 */
 	isImageMirrored?: (imageId: string, cid: string) => boolean
-	/** Asks the catalogue's PDS whether it holds a blob: true, false (404), or undefined (couldn't tell). */
-	checkCatalogueBlob?: (cid: string) => Promise<boolean | undefined>
-	/** Called when the catalogue's PDS says it lacks a blob the ledger recorded as mirrored. */
-	onCatalogueBlobMissing?: (imageId: string) => void
 }
 
 interface MediaRef { imageId: string; cid: string }
@@ -63,23 +65,6 @@ export function mirroredMediaCids(changes: Record<string, unknown>, isImageMirro
 	if (!isImageMirrored) return []
 	const cids = mediaRefs(changes).filter((r) => isImageMirrored(r.imageId, r.cid)).map((r) => r.cid)
 	return [...new Set(cids)].sort()
-}
-
-/**
- * Before the rkey is hashed, confirm with the catalogue's PDS each blob the
- * ledger says is mirrored. A 404 clears that ledger entry, so the key never
- * counts a blob as mirrored that the catalogue doesn't hold.
- */
-async function verifyMirroredMedia(changes: Record<string, unknown>, options: SyncGameOptions): Promise<void> {
-	const { isImageMirrored, checkCatalogueBlob, onCatalogueBlobMissing } = options
-	if (!isImageMirrored || !checkCatalogueBlob) return
-	for (const ref of mediaRefs(changes)) {
-		if (!isImageMirrored(ref.imageId, ref.cid)) continue
-		if ((await checkCatalogueBlob(ref.cid)) === false) {
-			console.warn(`  [contributions] Catalogue repo lacks blob ${ref.cid} (${ref.imageId}) the ledger recorded as mirrored; clearing it`)
-			onCatalogueBlobMissing?.(ref.imageId)
-		}
-	}
 }
 
 const BLOB_NOT_FOUND = /BlobNotFound|Could not find blob/
@@ -168,7 +153,6 @@ export async function syncGameViaContribution(
 	// The rkey covers the base record and the mirror state of the media: the
 	// same diff against a changed base, or with its blobs newly in the
 	// catalogue, is a new contribution, not a duplicate of the old one.
-	await verifyMirroredMedia(changes, options)
 	const result = await submit(contributionClient, { contributionType: 'correction', changes, subject: existing.uri, baseCid: stored.cid }, options)
 
 	if (existing.redirectedFrom && result.action === 'created') {
