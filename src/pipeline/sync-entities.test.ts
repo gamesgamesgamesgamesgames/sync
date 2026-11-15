@@ -254,18 +254,42 @@ describe('syncEntityType cursor', () => {
 		expect(state.getFailureStreak('game', '1')).toBe(0)
 	})
 
-	test('every game failing with an unreadable record never charges a game, however many nights', async () => {
-		// The 2026-11-15 failure: getGame finds the game, the record read fails.
-		const client = {
-			getGameByIgdbId: vi.fn(async (igdbId: string) => ({ uri: `at://did:web:g/games.gamesgamesgamesgames.game/${igdbId}`, record: { name: 'x' } })),
-			getGameRecord: vi.fn(async () => null),
+	/** getGame finds every game; the stored-record read fails for the ids in `unreadable`. */
+	function readClient(unreadable: (id: number) => boolean): ContributionClient {
+		return {
+			getGameByIgdbId: vi.fn(async (igdbId: string) => ({ uri: `at://did:web:g/games.gamesgamesgamesgames.game/${igdbId}`, record: {} })),
+			getGameRecord: vi.fn(async (uri: string) => {
+				const id = Number(uri.split('/').pop())
+				return unreadable(id) ? null : { uri, cid: `bafy${id}`, value: { name: 'old' } }
+			}),
 			getRecord: vi.fn(async () => null),
-			createContribution: vi.fn(),
+			canReadRepo: vi.fn(() => true),
+			createContribution: vi.fn(async () => ({ uri: 'at://x/c/1' })),
 		} as unknown as ContributionClient
-		for (let n = 1; n <= 6; n++) {
+	}
+
+	test('one unreadable game among many is charged, and after 3 runs the cursor moves past it', async () => {
+		const client = readClient((id) => id === 7)
+		for (let n = 1; n <= 2; n++) {
 			day(n)
 			const r = await run(client, range(50))
-			expect(r.systemic).toBeGreaterThan(0)
+			expect(r.systemic).toBe(0)
+			expect(r.cursorAdvanced).toBe(false)
+			expect(state.getFailureStreak('game', '7')).toBe(n)
+		}
+		day(3)
+		const third = await run(client, range(50))
+		expect(third.givenUp).toBe(1)
+		expect(third.cursorAdvanced).toBe(true)
+		expect(state.getFailures('game')).toEqual(['7'])
+	})
+
+	test('every game unreadable (a broken read path) trips the breaker, and no game is charged while it holds', async () => {
+		const client = readClient(() => true)
+		for (let n = 1; n <= 3; n++) {
+			day(n)
+			const r = await run(client, range(50))
+			expect(r.systemic).toBe(1)
 			expect(r.givenUp).toBe(0)
 			expect(r.cursorAdvanced).toBe(false)
 		}
@@ -442,10 +466,17 @@ describe('classifyFailure', () => {
 		expect(classifyFailure(new ContributionRequestError('x', status, ''))).toBe(kind)
 	})
 
-	test('an unreadable record, a refused read and an unresolvable PDS are systemic', () => {
-		expect(classifyFailure(new RecordUnreadableError('at://x/g/1', '602'))).toBe('systemic')
-		expect(classifyFailure(new RecordReadError('at://x/g/1', 400, 'InvalidRequest'))).toBe('systemic')
-		expect(classifyFailure(new PdsResolutionError('did:web:x', 'no service'))).toBe('systemic')
+	test('record-read failures: transport trouble is systemic, a bad record or DID is the game\'s', () => {
+		expect(classifyFailure(new RecordUnreadableError('at://x/g/1', '602'))).toBe('entity')
+		expect(classifyFailure(new RecordReadError('at://x/g/1', 400, 'InvalidRequest: Could not find repo'))).toBe('entity')
+		expect(classifyFailure(new RecordReadError('at://x/g/1', 0, 'response exceeds the cap'))).toBe('entity')
+		expect(classifyFailure(new RecordReadError('at://x/g/1', 503, 'Service Unavailable'))).toBe('systemic')
+		expect(classifyFailure(new RecordReadError('at://x/g/1', 429, 'RateLimited'))).toBe('systemic')
+		expect(classifyFailure(new PdsResolutionError('did:web:x', 'no atproto_pds service'))).toBe('entity')
+		expect(classifyFailure(new PdsResolutionError('did:plc:x', 'returned 410'))).toBe('entity')
+		expect(classifyFailure(new PdsResolutionError('did:web:x', 'fetch failed', true))).toBe('systemic')
+		const timeout = new Error('The operation was aborted due to timeout'); timeout.name = 'TimeoutError'
+		expect(classifyFailure(timeout)).toBe('systemic')
 	})
 
 	test('network errors are systemic', () => {

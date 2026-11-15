@@ -44,6 +44,27 @@ describe('PdsResolver', () => {
 		await expect(new PdsResolver({ fetch: fetchImpl as unknown as typeof fetch }).resolve('did:plc:abc')).rejects.toBeInstanceOf(PdsResolutionError)
 	})
 
+	test('transport trouble is transient; a missing or gone DID is not', async () => {
+		const network = vi.fn(async () => { throw new TypeError('fetch failed') })
+		const e1 = await new PdsResolver({ fetch: network as unknown as typeof fetch }).resolve('did:plc:a').catch((e) => e)
+		expect(e1).toBeInstanceOf(PdsResolutionError); expect(e1.transient).toBe(true)
+		const down = vi.fn(async () => json(503, {}))
+		expect((await new PdsResolver({ fetch: down as unknown as typeof fetch }).resolve('did:plc:a').catch((e) => e)).transient).toBe(true)
+		const gone = vi.fn(async () => json(410, {}))
+		expect((await new PdsResolver({ fetch: gone as unknown as typeof fetch }).resolve('did:plc:a').catch((e) => e)).transient).toBe(false)
+		const noService = vi.fn(async () => json(200, { service: [] }))
+		expect((await new PdsResolver({ fetch: noService as unknown as typeof fetch }).resolve('did:plc:a').catch((e) => e)).transient).toBe(false)
+	})
+
+	test('DID document fetches refuse redirects, carry a timeout, and cap the size', async () => {
+		const fetchImpl = vi.fn(async (_u: string, _i?: RequestInit) => json(200, doc('did:plc:a', 'https://p.test')))
+		await new PdsResolver({ fetch: fetchImpl as unknown as typeof fetch }).resolve('did:plc:a')
+		const init = fetchImpl.mock.calls[0]![1]!
+		expect(init.redirect).toBe('error'); expect(init.signal).toBeInstanceOf(AbortSignal)
+		const huge = vi.fn(async () => new Response('{"x":"' + 'y'.repeat(300 * 1024) + '"}', { status: 200 }))
+		await expect(new PdsResolver({ fetch: huge as unknown as typeof fetch }).resolve('did:plc:a')).rejects.toThrow(/cap/)
+	})
+
 	test('a failed document fetch throws', async () => {
 		const fetchImpl = vi.fn(async () => json(404, {}))
 		await expect(new PdsResolver({ fetch: fetchImpl as unknown as typeof fetch }).resolve('did:plc:abc')).rejects.toThrow(/returned 404/)

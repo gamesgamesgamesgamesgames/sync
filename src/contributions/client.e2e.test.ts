@@ -72,6 +72,7 @@ function realClient() {
 		clientSecret: 'secret',
 		storagePath: '/nonexistent',
 		pdsResolver: new PdsResolver({ plcDirectoryUrl: plcUrl }),
+		readableRepos: [DID],
 		retry: { sleep: async () => {} },
 	})
 }

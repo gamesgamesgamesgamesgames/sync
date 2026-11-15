@@ -1,12 +1,13 @@
 import { describe, test, expect, vi } from 'vitest'
-import { ContributionClient, ContributionRequestError, RecordReadError } from './client.js'
+import { ContributionClient, ContributionRequestError, RecordReadError, RecordReadNotAllowedError } from './client.js'
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
 	return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } })
 }
 
-function client(fetchImpl: typeof fetch) {
+function client(fetchImpl: typeof fetch, readableRepos: string[] = ['did:web:x.test']) {
 	return new ContributionClient({
+		readableRepos,
 		instanceUrl: 'https://hv.test',
 		clientId: 'https://client.test/metadata.json',
 		clientKey: 'hvc_test',
@@ -99,6 +100,30 @@ describe('ContributionClient.getGameRecord', () => {
 		const err = await client(fetchImpl as unknown as typeof fetch).getGameRecord('at://did:web:x.test/games.gamesgamesgamesgames.game/a').catch((e) => e)
 		expect(err).toBeInstanceOf(RecordReadError)
 		expect(err.status).toBe(400)
+	})
+
+	test('a repo that is not allowlisted is refused before any request', async () => {
+		const fetchImpl = vi.fn(async () => json(200, {}))
+		const err = await client(fetchImpl as unknown as typeof fetch, []).getGameRecord('at://did:web:evil.test/games.gamesgamesgamesgames.game/a').catch((e) => e)
+		expect(err).toBeInstanceOf(RecordReadNotAllowedError)
+		expect(fetchImpl).not.toHaveBeenCalled()
+	})
+
+	test('reads refuse redirects and carry a timeout', async () => {
+		const fetchImpl = routed(() => json(200, { uri: 'u', value: {} }))
+		await client(fetchImpl as unknown as typeof fetch).getGameRecord('at://did:web:x.test/games.gamesgamesgamesgames.game/a')
+		for (const [, init] of fetchImpl.mock.calls as unknown as Array<[string, RequestInit]>) {
+			expect(init.redirect).toBe('error')
+			expect(init.signal).toBeInstanceOf(AbortSignal)
+		}
+	})
+
+	test('an oversized record response is refused', async () => {
+		const big = JSON.stringify({ uri: 'u', value: { blob: 'x'.repeat(3 * 1024 * 1024) } })
+		const fetchImpl = routed(() => new Response(big, { status: 200, headers: { 'content-type': 'application/json' } }))
+		const err = await client(fetchImpl as unknown as typeof fetch).getGameRecord('at://did:web:x.test/games.gamesgamesgamesgames.game/a').catch((e) => e)
+		expect(err).toBeInstanceOf(RecordReadError)
+		expect(err.status).toBe(0)
 	})
 
 	test('the own-contribution dedupe reads from the sync account\'s PDS too', async () => {
