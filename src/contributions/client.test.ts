@@ -19,6 +19,15 @@ function client(fetchImpl: typeof fetch, readableRepos: string[] = ['did:web:x.t
 }
 
 describe('ContributionClient.getGameByIgdbId', () => {
+	test('asks for org credits only when told to', async () => {
+		const fetchImpl = vi.fn(async (_url: string) => json(200, {}))
+		const c = client(fetchImpl as unknown as typeof fetch)
+		await c.getGameByIgdbId('7')
+		await c.getGameByIgdbId('7', { includeOrgCredits: true })
+		expect(fetchImpl.mock.calls[0]![0]).toBe('https://hv.test/xrpc/games.gamesgamesgamesgames.getGame?igdbId=7')
+		expect(fetchImpl.mock.calls[1]![0]).toBe('https://hv.test/xrpc/games.gamesgamesgamesgames.getGame?igdbId=7&includeOrgCredits=true')
+	})
+
 	test('treats a 200 with no game as not found', async () => {
 		const fetchImpl = vi.fn(async () => json(200, {}))
 		expect(await client(fetchImpl as unknown as typeof fetch).getGameByIgdbId('1')).toBeNull()

@@ -10,7 +10,15 @@ describe('syncPasses', () => {
 	})
 
 	test('the nightly run is unchanged', () => {
-		expect([...syncPasses(undefined)]).toEqual(['platform', 'game', 'collection', 'franchise', 'companies', 'autoAcceptSweep'])
+		expect([...syncPasses(undefined)]).toEqual(['platform', 'game', 'collection', 'franchise', 'companies', 'orgCredits', 'autoAcceptSweep'])
+	})
+
+	test('a credits backfill is the credits step only', () => {
+		expect([...syncPasses(undefined, [1])]).toEqual(['orgCredits'])
+	})
+
+	test('--igdb-ids and --backfill-credits are refused together', () => {
+		expect(() => syncPasses([1], [2])).toThrow(/separate runs/)
 	})
 })
 
@@ -23,6 +31,12 @@ describe('igdbIdsArg', () => {
 	test('is undefined without the flag', () => {
 		expect(igdbIdsArg([])).toBeUndefined()
 		expect(igdbIdsArg(['--phase2-only'])).toBeUndefined()
+	})
+
+	test('reads another file flag the same way', () => {
+		expect(igdbIdsArg(['--backfill-credits', 'c.txt'], '--backfill-credits')).toBe('c.txt')
+		expect(igdbIdsArg(['--igdb-ids', 'i.txt'], '--backfill-credits')).toBeUndefined()
+		expect(() => igdbIdsArg(['--backfill-credits'], '--backfill-credits')).toThrow(/--backfill-credits needs a file path/)
 	})
 
 	test('refuses the flag without a path', () => {
