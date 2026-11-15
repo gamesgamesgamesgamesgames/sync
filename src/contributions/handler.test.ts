@@ -82,11 +82,11 @@ describe('syncGameViaContribution', () => {
 })
 
 describe('syncGameViaContribution without an applicationType', () => {
-	test('a new game is not proposed, since accepting it would fail', async () => {
+	test('a new game is held, not proposed, since accepting it would fail', async () => {
 		vi.spyOn(console, 'warn').mockImplementation(() => {})
 		const client = fakeClient()
 		const result = await syncGameViaContribution('9', { name: 'Brand New', externalIds: { igdb: '9' } }, client)
-		expect(result.action).toBe('skipped')
+		expect(result.action).toBe('held')
 		expect(client.createContribution).not.toHaveBeenCalled()
 		vi.restoreAllMocks()
 	})

@@ -152,6 +152,14 @@ export class StateManager {
 				last_error TEXT
 			);
 
+			-- New games not proposed because their IGDB game_type doesn't map to
+			-- an applicationType. Re-checked each run; released once proposed.
+			CREATE TABLE IF NOT EXISTS held_games (
+				igdb_id INTEGER PRIMARY KEY,
+				game_type TEXT,
+				held_at INTEGER NOT NULL
+			);
+
 			CREATE TABLE IF NOT EXISTS transformer_progress (
 				name TEXT NOT NULL,
 				entity_type TEXT NOT NULL,
@@ -577,6 +585,23 @@ export class StateManager {
 
 	getCreditQueueSize(): number {
 		return (this.db.prepare('SELECT COUNT(*) AS n FROM credit_queue').get() as { n: number }).n
+	}
+
+	/** Record a new game held for an unmapped game_type; keeps the first held_at. */
+	holdGame(igdbId: number, gameType: string | undefined, now = Math.floor(Date.now() / 1000)): void {
+		this.db.prepare(`
+			INSERT INTO held_games (igdb_id, game_type, held_at) VALUES (?, ?, ?)
+			ON CONFLICT (igdb_id) DO UPDATE SET game_type = excluded.game_type
+		`).run(igdbId, gameType ?? null, now)
+	}
+
+	releaseHeldGame(igdbId: number): void {
+		this.db.prepare('DELETE FROM held_games WHERE igdb_id = ?').run(igdbId)
+	}
+
+	getHeldGames(): Array<{ igdbId: number; gameType: string | null; heldAt: number }> {
+		const rows = this.db.prepare('SELECT igdb_id, game_type, held_at FROM held_games ORDER BY igdb_id').all() as Array<{ igdb_id: number; game_type: string | null; held_at: number }>
+		return rows.map((r) => ({ igdbId: r.igdb_id, gameType: r.game_type, heldAt: r.held_at }))
 	}
 
 	close(): void {

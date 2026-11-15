@@ -19,7 +19,8 @@ export class RecordUnreadableError extends Error {
 const CONTRIBUTION_COLLECTION = 'games.gamesgamesgamesgames.contribution'
 
 export interface ContributionSyncResult {
-	action: 'created' | 'skipped'
+	/** `held`: a new game not proposed yet, because it has no applicationType. */
+	action: 'created' | 'skipped' | 'held'
 	contributionType?: 'correction' | 'newGame'
 	uri?: string
 }
@@ -160,10 +161,11 @@ export async function syncGameViaContribution(
 	if (!existing) {
 		const changes = pickContributableFields(mappedRecord)
 		// acceptContribution and auto-accept refuse a newGame without one, and
-		// it would sit pending for good. A later run sends it once the type maps.
+		// it would sit pending for good. The caller records the game as held,
+		// and a later run proposes it once its game_type maps.
 		if (!changes.applicationType) {
-			console.warn(`  [contributions] IGDB ${igdbId} has no applicationType; not proposing it as a new game yet`)
-			return { action: 'skipped' }
+			console.warn(`  [contributions] IGDB ${igdbId} has no applicationType; holding it instead of proposing it as a new game`)
+			return { action: 'held' }
 		}
 		return submit(contributionClient, { contributionType: 'newGame', changes }, options)
 	}
