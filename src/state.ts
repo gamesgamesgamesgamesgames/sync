@@ -119,6 +119,13 @@ export class StateManager {
 				image_id TEXT PRIMARY KEY
 			);
 
+			-- Cached blobs known to be in the contributor's (the sync account's)
+			-- repo. Blobs cached before 2026-06-18 were uploaded to the catalogue
+			-- repo only, and a contribution can't reference those.
+			CREATE TABLE IF NOT EXISTS blob_contributor (
+				image_id TEXT PRIMARY KEY
+			);
+
 			CREATE TABLE IF NOT EXISTS steam_map (
 				igdb_id TEXT PRIMARY KEY,
 				steam_id TEXT NOT NULL,
@@ -309,6 +316,16 @@ export class StateManager {
 	/** Whether a cached blob is known to be in the catalogue repo too. */
 	isBlobMirrored(imageId: string): boolean {
 		return !!this.db.prepare('SELECT 1 FROM blob_mirrors WHERE image_id = ?').get(imageId)
+	}
+
+	/** Whether a cached blob is known to be in the contributor's repo. */
+	isBlobInContributor(imageId: string): boolean {
+		return !!this.db.prepare('SELECT 1 FROM blob_contributor WHERE image_id = ?').get(imageId)
+	}
+
+	/** Record that a cached blob is in the contributor's repo. */
+	setBlobInContributor(imageId: string): void {
+		this.db.prepare('INSERT OR IGNORE INTO blob_contributor (image_id) VALUES (?)').run(imageId)
 	}
 
 	/** Record that a cached blob is in the catalogue repo too. */
