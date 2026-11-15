@@ -13,7 +13,12 @@
  * already pending or running is reported, not queued twice. The account must
  * be in HappyView's MAINTENANCE_DIDS script variable.
  *
- * Prints one line per procedure, and exits non-zero if any call failed.
+ * Prints one line per procedure, and exits non-zero if any call failed. On
+ * appview this runs through cartridge-infra's maintenance trigger, which
+ * appends this output to /var/log/igdb-scrape/maintenance.log and gives the
+ * (public) Actions run a single status line. The trigger also skips the run
+ * while igdb-sync or any other igdb-* unit is active, because they share this
+ * session's single-use refresh tokens.
  */
 import 'dotenv/config'
 import { pathToFileURL } from 'node:url'
