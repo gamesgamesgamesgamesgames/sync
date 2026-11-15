@@ -211,6 +211,36 @@ async function mirrorCacheHit(
 	return runUpload(() => uploader.mirrorCached!(imageId, bytes, cached.mimeType, cached.ref.$link))
 }
 
+/** A media blob a contribution referenced, with what is needed to fetch it again. */
+export interface RestoreRef { imageId: string; cid: string; mimeType: string; mediaType: string }
+
+/**
+ * After the contributor's PDS refused a contribution for a missing blob (and
+ * the ledger has forgotten those images), copy each blob to the contributor's
+ * repo again so the same media can be retried at once. True only when every
+ * blob is now confirmed there at the CID the media already names. A changed
+ * CID is adopted for the next run but means this media can't be reused, so
+ * that is false too.
+ */
+export async function restoreContributorBlobs(uploader: BlobUploader, igdb: IGDBClient, refs: RestoreRef[]): Promise<boolean> {
+	if (refs.length === 0 || !uploader.mirrorCached || !uploader.allInContributor) return false
+	for (const r of refs) {
+		const sizeKey = r.mediaType === 'cover' ? 'cover'
+			: r.mediaType === 'screenshot' ? 'screenshot'
+			: r.mediaType === 'icon' ? 'logo'
+			: 'artwork'
+		let bytes: Buffer
+		try {
+			bytes = await igdb.downloadImage(r.imageId, IMAGE_SIZES[sizeKey])
+		} catch (err) {
+			console.warn(`[igdb] Failed to download image ${r.imageId} to restore its blob:`, (err as Error).message)
+			return false
+		}
+		if (await uploader.mirrorCached(r.imageId, bytes, r.mimeType, r.cid)) return false
+	}
+	return uploader.allInContributor(refs)
+}
+
 /** The blob reference shape used in atproto records. */
 export interface BlobRef {
 	$type: 'blob'

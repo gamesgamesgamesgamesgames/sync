@@ -28,7 +28,7 @@ import { needsAttention, syncEntityType, type SyncEntityConfig, type SyncResult 
 import { ContributionClient } from './contributions/client.js'
 import { syncNewCompanies } from './pipeline/sync-companies.js'
 import { slugify } from './helpers.js'
-import { MirroringBlobUploader, assertCatalogueAccount } from './media.js'
+import { MirroringBlobUploader, assertCatalogueAccount, restoreContributorBlobs } from './media.js'
 import type {
 	// IGDBPlatformFamily,
 	IGDBPlatform,
@@ -164,6 +164,8 @@ async function main() {
 		contributionClient,
 		onMissingContributorBlobs: (imageIds) => imageIds.forEach((id) => state.clearBlobInContributor(id)),
 		isImageMirrored: (imageId, cid) => state.isBlobMirrored(imageId, cid),
+		restoreContributorBlobs: (refs) => restoreContributorBlobs(blobUploader, igdb, refs),
+		onContributorBlobsReferenced: (refs) => state.markContributorBlobsReferenced(refs),
 		igdbEndpoint: 'games',
 		igdbFields: [
 			'fields name, summary, storyline, slug, category, game_type.type,',

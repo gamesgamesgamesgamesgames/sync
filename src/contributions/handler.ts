@@ -39,9 +39,17 @@ export interface SyncGameOptions {
 	 * references yet, so it can't confirm a fresh mirror.
 	 */
 	isImageMirrored?: (imageId: string, cid: string) => boolean
+	/**
+	 * Copy these blobs to the contributor's repo again after a missing-blob
+	 * refusal; true when the same media can be retried. Without it, or when it
+	 * returns false, the contribution goes ahead without media.
+	 */
+	restoreContributorBlobs?: (refs: MediaRef[]) => Promise<boolean>
+	/** Told which blobs a created (or already existing) contribution references. */
+	onContributorBlobsReferenced?: (refs: MediaRef[]) => void
 }
 
-interface MediaRef { imageId: string; cid: string }
+export interface MediaRef { imageId: string; cid: string; mimeType: string; mediaType: string }
 
 function mediaRefs(changes: Record<string, unknown>): MediaRef[] {
 	if (!Array.isArray(changes.media)) return []
@@ -49,7 +57,9 @@ function mediaRefs(changes: Record<string, unknown>): MediaRef[] {
 	for (const item of changes.media as Array<Record<string, unknown>>) {
 		const imageId = typeof item?.igdbImageId === 'string' ? item.igdbImageId : undefined
 		const cid = blobCid(item?.blob)
-		if (imageId && cid) refs.push({ imageId, cid })
+		const mimeType = (item?.blob as { mimeType?: unknown } | undefined)?.mimeType
+		const mediaType = typeof item?.mediaType === 'string' ? item.mediaType : 'artwork'
+		if (imageId && cid) refs.push({ imageId, cid, mimeType: typeof mimeType === 'string' ? mimeType : 'image/jpeg', mediaType })
 	}
 	return refs
 }
@@ -77,13 +87,16 @@ function isBlobNotFound(err: unknown): boolean {
 /**
  * Create a contribution unless one with the same content already exists. If
  * the contributor's PDS refuses it because a media blob is missing (the ledger
- * was wrong), forget those blobs and retry once without `media`, so the other
- * fields still land and the media follows on a later run.
+ * was wrong, or the PDS deleted a blob nothing referenced yet), forget those
+ * blobs, copy them again and retry once with the same media. If they can't be
+ * restored, or the retry is refused too, retry once more without `media`, so
+ * the other fields still land and the media follows on a later run.
  */
 async function submit(
 	contributionClient: ContributionClient,
 	params: { contributionType: 'correction' | 'newGame'; changes: Record<string, unknown>; subject?: string; baseCid?: string },
 	options: SyncGameOptions,
+	mediaRetried = false,
 ): Promise<ContributionSyncResult> {
 	const { contributionType, changes, subject, baseCid } = params
 	const rkey = contributionType === 'newGame'
@@ -91,23 +104,40 @@ async function submit(
 		: contentHashRkey(changes, baseCid, mirroredMediaCids(changes, options.isImageMirrored))
 	const existingRecord = await contributionClient.getRecord(CONTRIBUTION_COLLECTION, rkey)
 	if (existingRecord) {
+		// That contribution already references these blobs, so they are kept.
+		if (changes.media !== undefined) options.onContributorBlobsReferenced?.(mediaRefs(changes))
 		return { action: 'skipped' }
 	}
 
 	try {
 		const result = await contributionClient.createContribution({ contributionType, changes, rkey, ...(subject ? { subject } : {}) })
+		if (changes.media !== undefined) options.onContributorBlobsReferenced?.(mediaRefs(changes))
 		return { action: 'created', contributionType, uri: result.uri }
 	} catch (err) {
-		// The retry has no media, so it can't come back here: at most one retry.
+		// The without-media retry can't come back here, and the with-media one
+		// only once: at most two retries.
 		if (!isBlobNotFound(err) || changes.media === undefined) throw err
-		const imageIds = mediaRefs(changes).map((r) => r.imageId)
-		options.onMissingContributorBlobs?.(imageIds)
-		console.warn(`  [contributions] Contributor repo is missing media blobs (${imageIds.length} images); retrying without media`)
+		const refs = mediaRefs(changes)
+		options.onMissingContributorBlobs?.(refs.map((r) => r.imageId))
+		const complete = Array.isArray(changes.media) && refs.length === changes.media.length
+		if (!mediaRetried && complete && options.restoreContributorBlobs) {
+			let restored = false
+			try {
+				restored = await options.restoreContributorBlobs(refs)
+			} catch (restoreErr) {
+				console.warn(`  [contributions] Could not restore media blobs:`, (restoreErr as Error).message)
+			}
+			if (restored) {
+				console.warn(`  [contributions] Contributor repo was missing media blobs (${refs.length} images); copied them again, retrying with media`)
+				return submit(contributionClient, params, options, true)
+			}
+		}
+		console.warn(`  [contributions] Contributor repo is missing media blobs (${refs.length} images); retrying without media`)
 		const { media: _media, ...rest } = changes
 		if (Object.keys(rest).length === 0) {
 			return { action: 'skipped' }
 		}
-		return submit(contributionClient, { ...params, changes: rest }, options)
+		return submit(contributionClient, { ...params, changes: rest }, options, true)
 	}
 }
 

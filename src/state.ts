@@ -10,6 +10,13 @@
 
 import Database from 'better-sqlite3'
 
+/**
+ * How long a contributor blob confirmation is trusted when no contribution
+ * references the blob. The contributor's PDS (Tranquil) deletes unreferenced
+ * blobs after a 6-hour grace period, checked hourly.
+ */
+export const CONTRIBUTOR_BLOB_TRUST_SECONDS = 5 * 3600
+
 const STATE_FILE = 'state.sqlite'
 
 export type PhaseName =
@@ -166,6 +173,18 @@ export class StateManager {
 			if (!columns.some((c) => c.name === 'cid')) {
 				this.db.exec(`ALTER TABLE ${table} ADD COLUMN cid TEXT`)
 			}
+		}
+
+		// The contributor's PDS deletes blobs no record references once they are
+		// a few hours old, so a contributor entry records when it was confirmed
+		// and whether a created contribution references it. Older ledgers get
+		// both columns empty: unconfirmed, so their blobs are checked again.
+		const contributorColumns = this.db.prepare('PRAGMA table_info(blob_contributor)').all() as Array<{ name: string }>
+		if (!contributorColumns.some((c) => c.name === 'confirmed_at')) {
+			this.db.exec('ALTER TABLE blob_contributor ADD COLUMN confirmed_at INTEGER')
+		}
+		if (!contributorColumns.some((c) => c.name === 'referenced')) {
+			this.db.exec('ALTER TABLE blob_contributor ADD COLUMN referenced INTEGER NOT NULL DEFAULT 0')
 		}
 
 		console.log(`[state] Opened ${STATE_FILE} (phase: "${this.getCurrentPhase()}")`)
@@ -341,13 +360,34 @@ export class StateManager {
 	}
 
 	/** Whether the contributor's repo is known to hold this image's blob at this CID. */
+	/**
+	 * Whether the contributor's repo can be trusted to hold this image's blob
+	 * at this CID: a created contribution references it, or it was confirmed
+	 * less than CONTRIBUTOR_BLOB_TRUST_SECONDS ago. Anything else may have been
+	 * deleted as unreferenced and is checked again.
+	 */
 	isBlobInContributor(imageId: string, cid: string): boolean {
-		return !!this.db.prepare('SELECT 1 FROM blob_contributor WHERE image_id = ? AND cid = ?').get(imageId, cid)
+		const since = Math.floor(Date.now() / 1000) - CONTRIBUTOR_BLOB_TRUST_SECONDS
+		return !!this.db.prepare(
+			'SELECT 1 FROM blob_contributor WHERE image_id = ? AND cid = ? AND (referenced = 1 OR confirmed_at >= ?)',
+		).get(imageId, cid, since)
 	}
 
-	/** Record that the contributor's repo holds this image's blob at this CID. */
+	/** Record that the contributor's repo holds this image's blob at this CID, as of now. */
 	setBlobInContributor(imageId: string, cid: string): void {
-		this.db.prepare('INSERT OR REPLACE INTO blob_contributor (image_id, cid) VALUES (?, ?)').run(imageId, cid)
+		this.db.prepare(
+			`INSERT INTO blob_contributor (image_id, cid, confirmed_at, referenced) VALUES (?, ?, ?, 0)
+			 ON CONFLICT (image_id) DO UPDATE SET
+			   cid = excluded.cid,
+			   confirmed_at = excluded.confirmed_at,
+			   referenced = CASE WHEN blob_contributor.cid = excluded.cid THEN blob_contributor.referenced ELSE 0 END`,
+		).run(imageId, cid, Math.floor(Date.now() / 1000))
+	}
+
+	/** Record that a created contribution references these blobs, so they are kept. */
+	markContributorBlobsReferenced(refs: Array<{ imageId: string; cid: string }>): void {
+		const stmt = this.db.prepare('UPDATE blob_contributor SET referenced = 1 WHERE image_id = ? AND cid = ?')
+		for (const r of refs) stmt.run(r.imageId, r.cid)
 	}
 
 	/** Forget the contributor copy of an image's blob. */

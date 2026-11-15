@@ -12,7 +12,7 @@ import type { StateManager, EntityType } from '../state.js'
 import { XRPCError } from '@atproto/xrpc'
 import { ContributionRequestError, RecordReadError, type ContributionClient } from '../contributions/client.js'
 import { PdsResolutionError } from '../atproto/pds-resolver.js'
-import { RecordUnreadableError, syncGameViaContribution } from '../contributions/handler.js'
+import { RecordUnreadableError, syncGameViaContribution, type SyncGameOptions } from '../contributions/handler.js'
 import { errorLabel, prefetch } from '../helpers.js'
 import { flushBatch, type PendingRecord } from './batch.js'
 import { ConcurrencyPool } from '../concurrency.js'
@@ -43,6 +43,10 @@ export interface SyncEntityConfig<T extends { id: number }> {
 	onMissingContributorBlobs?: (imageIds: string[]) => void
 	/** Whether an IGDB image's blob, at this CID, is mirrored to the catalogue repo; part of correction rkeys. */
 	isImageMirrored?: (imageId: string, cid: string) => boolean
+	/** Copy refused media blobs to the contributor's repo again, so the media can be retried in the same run. */
+	restoreContributorBlobs?: SyncGameOptions['restoreContributorBlobs']
+	/** Told which blobs a created contribution references. */
+	onContributorBlobsReferenced?: SyncGameOptions['onContributorBlobsReferenced']
 	/** Consecutive failed runs before an entity stops holding the cursor (default SYNC_MAX_FAILED_RUNS or 3). */
 	maxFailedRuns?: number
 	/** Warn when the cursor is older than this many hours (default SYNC_CURSOR_ALERT_HOURS or 72). */
@@ -390,6 +394,8 @@ export async function syncEntityType<T extends { id: number }>(
 						const syncResult = await syncGameViaContribution(key, record, contributionClient, {
 							onMissingContributorBlobs: config.onMissingContributorBlobs,
 							isImageMirrored: config.isImageMirrored,
+							restoreContributorBlobs: config.restoreContributorBlobs,
+							onContributorBlobsReferenced: config.onContributorBlobsReferenced,
 						})
 
 						state.clearFailureStreak(entityType, key)
