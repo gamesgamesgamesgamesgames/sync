@@ -323,6 +323,16 @@ export class StateManager {
 		return !!this.db.prepare('SELECT 1 FROM blob_contributor WHERE image_id = ?').get(imageId)
 	}
 
+	/** Forget that a cached blob is in the contributor's repo (it turned out not to be). */
+	clearBlobInContributor(imageId: string): void {
+		this.db.prepare('DELETE FROM blob_contributor WHERE image_id = ?').run(imageId)
+	}
+
+	/** Forget that a cached blob is in the catalogue repo (its bytes changed). */
+	clearBlobMirrored(imageId: string): void {
+		this.db.prepare('DELETE FROM blob_mirrors WHERE image_id = ?').run(imageId)
+	}
+
 	/** Record that a cached blob is in the contributor's repo. */
 	setBlobInContributor(imageId: string): void {
 		this.db.prepare('INSERT OR IGNORE INTO blob_contributor (image_id) VALUES (?)').run(imageId)

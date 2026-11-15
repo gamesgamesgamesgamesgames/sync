@@ -181,6 +181,29 @@ export class ContributionClient {
 		return result as Record<string, unknown> | null
 	}
 
+	/**
+	 * Whether the sync account's own PDS already holds a blob. Uses the public
+	 * com.atproto.sync.getBlob on that PDS (an allowlisted repo), so no upload
+	 * is needed for blobs that are already there. The body is not read.
+	 */
+	async hasContributorBlob(cid: string): Promise<boolean> {
+		if (!this.session) {
+			throw new Error('Not authenticated — call restore() first')
+		}
+		const did = this.session.did
+		const pds = await this.pdsResolver.resolve(did)
+		const url = `${pds}/xrpc/com.atproto.sync.getBlob?did=${encodeURIComponent(did)}&cid=${encodeURIComponent(cid)}`
+		const response = await fetchWithRetry('getBlob', () => this.fetchImpl(url, {
+			redirect: 'error',
+			signal: AbortSignal.timeout(SAFE_READ_TIMEOUT_MS),
+		}), this.retry)
+		const status = response.status
+		await response.body?.cancel().catch(() => undefined)
+		if (status === 200) return true
+		if (status === 404 || status === 400) return false
+		throw new RecordReadError(`at://${did}/blob/${cid}`, status, 'getBlob')
+	}
+
 	/** Whether raw records for this repo may be read from its PDS. */
 	canReadRepo(repo: string): boolean {
 		return this.readableRepos.has(repo) || this.session?.did === repo

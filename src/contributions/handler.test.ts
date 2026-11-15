@@ -1,6 +1,6 @@
 import { describe, test, expect, vi } from 'vitest'
 import { syncGameViaContribution } from './handler.js'
-import type { ContributionClient } from './client.js'
+import { ContributionRequestError, type ContributionClient } from './client.js'
 
 const GAME_URI = 'at://did:web:gamesgamesgamesgames.games/games.gamesgamesgamesgames.game/g1'
 
@@ -131,5 +131,59 @@ describe('correction rkeys', () => {
 		const client = fakeClient()
 		await syncGameViaContribution('9', { name: 'Brand New', applicationType: 'game' }, client)
 		expect(changesFor(client).rkey).toBe(contentHashRkey({ name: 'Brand New', applicationType: 'game' }))
+	})
+})
+
+describe('BlobNotFound recovery', () => {
+	const media = [{ blob: { $type: 'blob', ref: { $link: 'bafyM' }, mimeType: 'image/jpeg', size: 1 }, mediaType: 'cover', igdbImageId: 'coM' }]
+	const blobNotFound = () => new ContributionRequestError('createContribution', 500,
+		'{"error":"script_error","message":"runtime error: PDS createRecord returned 400 Bad Request: {\\"error\\":\\"BlobNotFound\\",\\"message\\":\\"Could not find blob: bafyM\\"}"}')
+	const existing = () => ({
+		getGameByIgdbId: vi.fn(async () => ({ uri: GAME_URI, record: {} })),
+		getGameRecord: vi.fn(async () => ({ uri: GAME_URI, cid: 'bafyBase', value: { summary: 'old' } })),
+	})
+
+	test('forgets the media blobs and retries once without media; the other fields land', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {})
+		const onMissing = vi.fn()
+		let n = 0
+		const client = fakeClient({ ...existing(), createContribution: vi.fn(async () => { if (++n === 1) throw blobNotFound(); return { uri: 'at://x/c/2' } }) })
+		const result = await syncGameViaContribution('1', { summary: 'new', media }, client, { onMissingContributorBlobs: onMissing })
+		expect(result.action).toBe('created')
+		expect(onMissing).toHaveBeenCalledWith(['coM'])
+		expect(client.createContribution).toHaveBeenCalledTimes(2)
+		expect((client.createContribution.mock.calls[1]![0] as { changes: unknown }).changes).toEqual({ summary: 'new' })
+	})
+
+	test('a media-only change is skipped after forgetting its blobs', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {})
+		const onMissing = vi.fn()
+		const client = fakeClient({ ...existing(), createContribution: vi.fn(async () => { throw blobNotFound() }) })
+		const result = await syncGameViaContribution('1', { summary: 'old', media }, client, { onMissingContributorBlobs: onMissing })
+		expect(result.action).toBe('skipped')
+		expect(onMissing).toHaveBeenCalledWith(['coM'])
+		expect(client.createContribution).toHaveBeenCalledTimes(1)
+	})
+
+	test('retries only once', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {})
+		const client = fakeClient({ ...existing(), createContribution: vi.fn(async () => { throw blobNotFound() }) })
+		await expect(syncGameViaContribution('1', { summary: 'new', media }, client)).rejects.toBeInstanceOf(ContributionRequestError)
+		expect(client.createContribution).toHaveBeenCalledTimes(2)
+	})
+
+	test('other errors are not retried', async () => {
+		const client = fakeClient({ ...existing(), createContribution: vi.fn(async () => { throw new ContributionRequestError('createContribution', 500, 'script_error: something else') }) })
+		await expect(syncGameViaContribution('1', { summary: 'new', media }, client)).rejects.toBeInstanceOf(ContributionRequestError)
+		expect(client.createContribution).toHaveBeenCalledTimes(1)
+	})
+
+	test('a newGame retries without media too', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {})
+		let n = 0
+		const client = fakeClient({ createContribution: vi.fn(async () => { if (++n === 1) throw blobNotFound(); return { uri: 'at://x/c/3' } }) })
+		const result = await syncGameViaContribution('9', { name: 'New', applicationType: 'game', media }, client)
+		expect(result).toMatchObject({ action: 'created', contributionType: 'newGame' })
+		expect((client.createContribution.mock.calls[1]![0] as { changes: unknown }).changes).toEqual({ name: 'New', applicationType: 'game' })
 	})
 })

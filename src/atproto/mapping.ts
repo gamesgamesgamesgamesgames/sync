@@ -270,6 +270,29 @@ export interface MapGameOptions {
 	blobUploader?: BlobUploader
 }
 
+/**
+ * Whether built media can go into the record. With an uploader that tracks the
+ * contributor's repo (the contribution path), every image must have been built
+ * and be confirmed there; otherwise the whole field is left out. Dropping only
+ * the missing items would make a shorter array, which diffs as removing them,
+ * and a blob the contributor's repo lacks makes its PDS refuse the
+ * contribution. The other fields still land; the media follows on a later run.
+ */
+export function mediaUsable(
+	uploader: BlobUploader,
+	tasks: ImageTask[],
+	media: Array<{ igdbImageId?: string }>,
+	igdbId?: number,
+): boolean {
+	if (media.length === 0) return false
+	if (!uploader.allInContributor) return true
+	const complete = media.length === tasks.length && uploader.allInContributor(tasks.map((t) => t.imageId))
+	if (!complete) {
+		console.warn(`[media] Leaving media out for IGDB ${igdbId ?? '?'}: ${media.length}/${tasks.length} images built, not all confirmed in the contributor repo`)
+	}
+	return complete
+}
+
 /** Extract external IDs from IGDB game websites. */
 function extractExternalIds(igdb: IGDBGame): Record<string, unknown> {
 	const ids: Record<string, unknown> = {
@@ -461,11 +484,11 @@ export async function mapGame(
 			record.media = options.existingMedia
 		} else if (imageTasks.length > 0) {
 			const media = await buildMediaItemsConcurrent(imageTasks, igdbClient, uploader, state)
-			if (media.length > 0) record.media = media
+			if (mediaUsable(uploader, imageTasks, media, igdb.id)) record.media = media
 		}
 	} else if (imageTasks.length > 0) {
 		const media = await buildMediaItemsConcurrent(imageTasks, igdbClient, uploader, state)
-		if (media.length > 0) record.media = media
+		if (mediaUsable(uploader, imageTasks, media, igdb.id)) record.media = media
 	}
 
 	// Releases (group IGDB release_dates by platform)
