@@ -281,12 +281,16 @@ export interface MapGameOptions {
 export function mediaUsable(
 	uploader: BlobUploader,
 	tasks: ImageTask[],
-	media: Array<{ igdbImageId?: string }>,
+	media: Array<{ igdbImageId?: string; blob?: { ref?: { $link?: string } } }>,
 	igdbId?: number,
 ): boolean {
 	if (media.length === 0) return false
 	if (!uploader.allInContributor) return true
-	const complete = media.length === tasks.length && uploader.allInContributor(tasks.map((t) => t.imageId))
+	const refs = (media as Array<{ igdbImageId?: string; blob?: { ref?: { $link?: string } } }>)
+		.map((m) => ({ imageId: m.igdbImageId ?? '', cid: m.blob?.ref?.$link ?? '' }))
+	const complete = media.length === tasks.length
+		&& refs.every((r) => r.imageId && r.cid)
+		&& uploader.allInContributor(refs)
 	if (!complete) {
 		console.warn(`[media] Leaving media out for IGDB ${igdbId ?? '?'}: ${media.length}/${tasks.length} images built, not all confirmed in the contributor repo`)
 	}

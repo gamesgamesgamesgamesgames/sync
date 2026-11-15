@@ -116,14 +116,16 @@ export class StateManager {
 			-- Cached blobs known to be in the catalogue repo as well as the
 			-- contributor's.
 			CREATE TABLE IF NOT EXISTS blob_mirrors (
-				image_id TEXT PRIMARY KEY
+				image_id TEXT PRIMARY KEY,
+				cid TEXT
 			);
 
 			-- Cached blobs known to be in the contributor's (the sync account's)
 			-- repo. Blobs cached before 2026-06-18 were uploaded to the catalogue
 			-- repo only, and a contribution can't reference those.
 			CREATE TABLE IF NOT EXISTS blob_contributor (
-				image_id TEXT PRIMARY KEY
+				image_id TEXT PRIMARY KEY,
+				cid TEXT
 			);
 
 			CREATE TABLE IF NOT EXISTS steam_map (
@@ -154,6 +156,16 @@ export class StateManager {
 		)
 		for (const phase of ALL_PHASES) {
 			insertPhase.run(phase)
+		}
+
+		// The blob ledgers record the CID each copy was made at; an entry only
+		// counts when (image_id, cid) both match. Ledgers created before the
+		// column existed get it added empty, which counts as unverified.
+		for (const table of ['blob_mirrors', 'blob_contributor']) {
+			const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+			if (!columns.some((c) => c.name === 'cid')) {
+				this.db.exec(`ALTER TABLE ${table} ADD COLUMN cid TEXT`)
+			}
 		}
 
 		console.log(`[state] Opened ${STATE_FILE} (phase: "${this.getCurrentPhase()}")`)
@@ -313,34 +325,34 @@ export class StateManager {
 		return row?.runs ?? 0
 	}
 
-	/** Whether a cached blob is known to be in the catalogue repo too. */
-	isBlobMirrored(imageId: string): boolean {
-		return !!this.db.prepare('SELECT 1 FROM blob_mirrors WHERE image_id = ?').get(imageId)
+	/** Whether the catalogue repo is known to hold this image's blob at this CID. */
+	isBlobMirrored(imageId: string, cid: string): boolean {
+		return !!this.db.prepare('SELECT 1 FROM blob_mirrors WHERE image_id = ? AND cid = ?').get(imageId, cid)
 	}
 
-	/** Whether a cached blob is known to be in the contributor's repo. */
-	isBlobInContributor(imageId: string): boolean {
-		return !!this.db.prepare('SELECT 1 FROM blob_contributor WHERE image_id = ?').get(imageId)
+	/** Record that the catalogue repo holds this image's blob at this CID. */
+	setBlobMirrored(imageId: string, cid: string): void {
+		this.db.prepare('INSERT OR REPLACE INTO blob_mirrors (image_id, cid) VALUES (?, ?)').run(imageId, cid)
 	}
 
-	/** Forget that a cached blob is in the contributor's repo (it turned out not to be). */
-	clearBlobInContributor(imageId: string): void {
-		this.db.prepare('DELETE FROM blob_contributor WHERE image_id = ?').run(imageId)
-	}
-
-	/** Forget that a cached blob is in the catalogue repo (its bytes changed). */
+	/** Forget the catalogue copy of an image's blob. */
 	clearBlobMirrored(imageId: string): void {
 		this.db.prepare('DELETE FROM blob_mirrors WHERE image_id = ?').run(imageId)
 	}
 
-	/** Record that a cached blob is in the contributor's repo. */
-	setBlobInContributor(imageId: string): void {
-		this.db.prepare('INSERT OR IGNORE INTO blob_contributor (image_id) VALUES (?)').run(imageId)
+	/** Whether the contributor's repo is known to hold this image's blob at this CID. */
+	isBlobInContributor(imageId: string, cid: string): boolean {
+		return !!this.db.prepare('SELECT 1 FROM blob_contributor WHERE image_id = ? AND cid = ?').get(imageId, cid)
 	}
 
-	/** Record that a cached blob is in the catalogue repo too. */
-	setBlobMirrored(imageId: string): void {
-		this.db.prepare('INSERT OR IGNORE INTO blob_mirrors (image_id) VALUES (?)').run(imageId)
+	/** Record that the contributor's repo holds this image's blob at this CID. */
+	setBlobInContributor(imageId: string, cid: string): void {
+		this.db.prepare('INSERT OR REPLACE INTO blob_contributor (image_id, cid) VALUES (?, ?)').run(imageId, cid)
+	}
+
+	/** Forget the contributor copy of an image's blob. */
+	clearBlobInContributor(imageId: string): void {
+		this.db.prepare('DELETE FROM blob_contributor WHERE image_id = ?').run(imageId)
 	}
 
 	/** Remove a failure entry after a successful retry. */

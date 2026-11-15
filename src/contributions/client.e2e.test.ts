@@ -108,10 +108,11 @@ describe('contributor blobs over real HTTP', () => {
 		// it to the fixture) before the contribution goes out.
 		const { MirroringBlobUploader, buildMediaItemsConcurrent } = await import('../media.js')
 		const c = sessioned()
-		const contributor = new Set<string>()
+		const contributor = new Map<string, string>()
 		const ledger = {
 			isBlobMirrored: () => true, setBlobMirrored: () => {},
-			isBlobInContributor: (id: string) => contributor.has(id), setBlobInContributor: (id: string) => { contributor.add(id) },
+			isBlobInContributor: (id: string, cid: string) => contributor.get(id) === cid,
+			setBlobInContributor: (id: string, cid: string) => { contributor.set(id, cid) },
 		}
 		const primary = { uploadBlob: async (_d: Uint8Array, _m: string, o?: { imageId?: string }) => {
 			const cid = o?.imageId === 'coOld' ? 'bafyOld' : 'bafyHeld'
@@ -133,7 +134,7 @@ describe('contributor blobs over real HTTP', () => {
 		for (const item of media) {
 			expect(await c.hasContributorBlob(item.blob.ref.$link)).toBe(true)
 		}
-		expect(uploader.allInContributor(['coHeld', 'coOld'])).toBe(true)
+		expect(uploader.allInContributor(media.map((m) => ({ imageId: m.igdbImageId!, cid: m.blob.ref.$link })))).toBe(true)
 	})
 })
 

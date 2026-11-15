@@ -41,6 +41,12 @@ export interface SyncEntityConfig<T extends { id: number }> {
 	contributionClient?: ContributionClient
 	/** Told which images' blobs the contributor's PDS turned out to lack. */
 	onMissingContributorBlobs?: (imageIds: string[]) => void
+	/** Whether an IGDB image's blob, at this CID, is mirrored to the catalogue repo; part of correction rkeys. */
+	isImageMirrored?: (imageId: string, cid: string) => boolean
+	/** Asks the catalogue's PDS whether it holds a blob (true, false for 404, undefined if unknown). */
+	checkCatalogueBlob?: (cid: string) => Promise<boolean | undefined>
+	/** Told when the catalogue's PDS lacks a blob the ledger had as mirrored. */
+	onCatalogueBlobMissing?: (imageId: string) => void
 	/** Consecutive failed runs before an entity stops holding the cursor (default SYNC_MAX_FAILED_RUNS or 3). */
 	maxFailedRuns?: number
 	/** Warn when the cursor is older than this many hours (default SYNC_CURSOR_ALERT_HOURS or 72). */
@@ -385,7 +391,12 @@ export async function syncEntityType<T extends { id: number }>(
 				// Contribution path: all games go through contributions
 				if (contributionClient && record) {
 					try {
-						const syncResult = await syncGameViaContribution(key, record, contributionClient, { onMissingContributorBlobs: config.onMissingContributorBlobs })
+						const syncResult = await syncGameViaContribution(key, record, contributionClient, {
+							onMissingContributorBlobs: config.onMissingContributorBlobs,
+							isImageMirrored: config.isImageMirrored,
+							checkCatalogueBlob: config.checkCatalogueBlob,
+							onCatalogueBlobMissing: config.onCatalogueBlobMissing,
+						})
 
 						state.clearFailureStreak(entityType, key)
 						if (syncResult.action === 'created') {

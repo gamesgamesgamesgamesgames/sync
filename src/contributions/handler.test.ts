@@ -187,3 +187,126 @@ describe('BlobNotFound recovery', () => {
 		expect((client.createContribution.mock.calls[1]![0] as { changes: unknown }).changes).toEqual({ name: 'New', applicationType: 'game' })
 	})
 })
+
+describe('correction rkeys and mirror state', () => {
+	const media = [
+		{ blob: { $type: 'blob', ref: { $link: 'bafyA' }, mimeType: 'image/jpeg', size: 1 }, mediaType: 'cover', igdbImageId: 'coA' },
+		{ blob: { $type: 'blob', ref: { $link: 'bafyB' }, mimeType: 'image/jpeg', size: 1 }, mediaType: 'screenshot', igdbImageId: 'scB' },
+	]
+	const make = () => fakeClient({
+		getGameByIgdbId: vi.fn(async () => ({ uri: GAME_URI, record: {} })),
+		getGameRecord: vi.fn(async () => ({ uri: GAME_URI, cid: 'bafyBase', value: { name: 'Portal' } })),
+	})
+	const rkeyOf = (c: ReturnType<typeof make>) => (c.createContribution.mock.calls[0]![0] as { rkey: string }).rkey
+
+	test('a media change gets a new rkey once its blobs are mirrored (same base, same changes)', async () => {
+		const before = make(); const after = make()
+		await syncGameViaContribution('1', { name: 'Portal', media }, before, { isImageMirrored: () => false })
+		await syncGameViaContribution('1', { name: 'Portal', media }, after, { isImageMirrored: () => true })
+		expect(rkeyOf(before)).not.toBe(rkeyOf(after))
+	})
+
+	test('the same mirror state keeps the rkey, so reruns still dedupe', async () => {
+		const a = make(); const b = make()
+		await syncGameViaContribution('1', { name: 'Portal', media }, a, { isImageMirrored: (id) => id === 'coA' })
+		await syncGameViaContribution('1', { name: 'Portal', media }, b, { isImageMirrored: (id) => id === 'coA' })
+		expect(rkeyOf(a)).toBe(rkeyOf(b))
+	})
+
+	test('partial mirroring is part of the key', async () => {
+		const one = make(); const both = make()
+		await syncGameViaContribution('1', { name: 'Portal', media }, one, { isImageMirrored: (id) => id === 'coA' })
+		await syncGameViaContribution('1', { name: 'Portal', media }, both, { isImageMirrored: () => true })
+		expect(rkeyOf(one)).not.toBe(rkeyOf(both))
+	})
+
+	test('with nothing mirrored the key is the same as before mirror state existed', async () => {
+		const { contentHashRkey } = await import('./hash.js')
+		const c = make()
+		await syncGameViaContribution('1', { name: 'Portal', media }, c, { isImageMirrored: () => false })
+		expect(rkeyOf(c)).toBe(contentHashRkey({ media }, 'bafyBase'))
+	})
+
+	test('a change without media ignores mirror state', async () => {
+		const a = make(); const b = make()
+		await syncGameViaContribution('1', { name: 'Portal 2' }, a, { isImageMirrored: () => false })
+		await syncGameViaContribution('1', { name: 'Portal 2' }, b, { isImageMirrored: () => true })
+		expect(rkeyOf(a)).toBe(rkeyOf(b))
+	})
+})
+
+describe('mirroredMediaCids', () => {
+	test('lists the mirrored media CIDs, sorted and unique', async () => {
+		const { mirroredMediaCids } = await import('./handler.js')
+		const changes = { media: [
+			{ blob: { ref: { $link: 'bafyZ' } }, igdbImageId: 'z' },
+			{ blob: { ref: { $link: 'bafyA' } }, igdbImageId: 'a' },
+			{ blob: { ref: { $link: 'bafyA' } }, igdbImageId: 'a' },
+			{ blob: { ref: { $link: 'bafyN' } }, igdbImageId: 'n' },
+			{ blob: { ref: { $link: 'bafyX' } } },
+		] }
+		expect(mirroredMediaCids(changes, (id) => id !== 'n')).toEqual(['bafyA', 'bafyZ'])
+		expect(mirroredMediaCids(changes)).toEqual([])
+		expect(mirroredMediaCids({ name: 'x' }, () => true)).toEqual([])
+	})
+})
+
+describe('catalogue pre-check and CID-aware mirror state', () => {
+	const media = [
+		{ blob: { $type: 'blob', ref: { $link: 'bafyA' }, mimeType: 'image/jpeg', size: 1 }, mediaType: 'cover', igdbImageId: 'coA' },
+	]
+	const make = () => fakeClient({
+		getGameByIgdbId: vi.fn(async () => ({ uri: GAME_URI, record: {} })),
+		getGameRecord: vi.fn(async () => ({ uri: GAME_URI, cid: 'bafyBase', value: { name: 'Portal' } })),
+	})
+	const rkeyOf = (c: ReturnType<typeof make>) => (c.createContribution.mock.calls[0]![0] as { rkey: string }).rkey
+	const mirrorLedger = (entries: Record<string, string>) => {
+		const m = new Map(Object.entries(entries))
+		return {
+			m,
+			isImageMirrored: (id: string, cid: string) => m.get(id) === cid,
+			onCatalogueBlobMissing: vi.fn((id: string) => { m.delete(id) }),
+		}
+	}
+
+	test('a 404 from the catalogue clears the entry before the rkey is hashed', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {})
+		const l = mirrorLedger({ coA: 'bafyA' })
+		const checkCatalogueBlob = vi.fn(async () => false)
+		const c = make(); const plain = make()
+		await syncGameViaContribution('1', { name: 'Portal', media }, c, { ...l, checkCatalogueBlob })
+		await syncGameViaContribution('1', { name: 'Portal', media }, plain, { isImageMirrored: () => false })
+		expect(checkCatalogueBlob).toHaveBeenCalledWith('bafyA')
+		expect(l.onCatalogueBlobMissing).toHaveBeenCalledWith('coA')
+		expect(rkeyOf(c)).toBe(rkeyOf(plain))
+	})
+
+	test('a confirmed or unknown catalogue answer keeps the mirrored CID in the key', async () => {
+		for (const answer of [true, undefined]) {
+			const l = mirrorLedger({ coA: 'bafyA' })
+			const c = make(); const unmirrored = make()
+			await syncGameViaContribution('1', { name: 'Portal', media }, c, { ...l, checkCatalogueBlob: async () => answer })
+			await syncGameViaContribution('1', { name: 'Portal', media }, unmirrored, { isImageMirrored: () => false })
+			expect(l.onCatalogueBlobMissing).not.toHaveBeenCalled()
+			expect(rkeyOf(c)).not.toBe(rkeyOf(unmirrored))
+		}
+	})
+
+	test('media not recorded as mirrored is not checked', async () => {
+		const checkCatalogueBlob = vi.fn(async () => true)
+		await syncGameViaContribution('1', { name: 'Portal', media }, make(), { ...mirrorLedger({}), checkCatalogueBlob })
+		expect(checkCatalogueBlob).not.toHaveBeenCalled()
+	})
+
+	test('adopt-then-key: an entry at the old CID does not make the adopted CID count as mirrored', async () => {
+		// The ledger still has coA at the CID from before adoption; the media now carries bafyA.
+		const stale = mirrorLedger({ coA: 'bafyOld' })
+		const c = make(); const unmirrored = make(); const mirrored = make()
+		await syncGameViaContribution('1', { name: 'Portal', media }, c, stale)
+		await syncGameViaContribution('1', { name: 'Portal', media }, unmirrored, { isImageMirrored: () => false })
+		expect(rkeyOf(c)).toBe(rkeyOf(unmirrored))
+		// Once the catalogue really holds the new CID, the key changes.
+		await syncGameViaContribution('1', { name: 'Portal', media }, mirrored, mirrorLedger({ coA: 'bafyA' }))
+		expect(rkeyOf(mirrored)).not.toBe(rkeyOf(unmirrored))
+	})
+})

@@ -182,15 +182,14 @@ export class ContributionClient {
 	}
 
 	/**
-	 * Whether the sync account's own PDS already holds a blob. Uses the public
-	 * com.atproto.sync.getBlob on that PDS (an allowlisted repo), so no upload
-	 * is needed for blobs that are already there. The body is not read.
+	 * Whether an allowlisted repo's PDS holds a blob, through the public
+	 * com.atproto.sync.getBlob. The body is never read. Throws on anything but
+	 * 200 or a not-found answer.
 	 */
-	async hasContributorBlob(cid: string): Promise<boolean> {
-		if (!this.session) {
-			throw new Error('Not authenticated — call restore() first')
+	async hasBlob(did: string, cid: string): Promise<boolean> {
+		if (!this.canReadRepo(did)) {
+			throw new RecordReadNotAllowedError(did)
 		}
-		const did = this.session.did
 		const pds = await this.pdsResolver.resolve(did)
 		const url = `${pds}/xrpc/com.atproto.sync.getBlob?did=${encodeURIComponent(did)}&cid=${encodeURIComponent(cid)}`
 		const response = await fetchWithRetry('getBlob', () => this.fetchImpl(url, {
@@ -202,6 +201,14 @@ export class ContributionClient {
 		if (status === 200) return true
 		if (status === 404 || status === 400) return false
 		throw new RecordReadError(`at://${did}/blob/${cid}`, status, 'getBlob')
+	}
+
+	/** Whether the sync account's own PDS already holds a blob. */
+	async hasContributorBlob(cid: string): Promise<boolean> {
+		if (!this.session) {
+			throw new Error('Not authenticated — call restore() first')
+		}
+		return this.hasBlob(this.session.did, cid)
 	}
 
 	/** Whether raw records for this repo may be read from its PDS. */
