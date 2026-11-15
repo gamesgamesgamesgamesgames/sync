@@ -181,6 +181,30 @@ describe('syncOrgCredits', () => {
 		expect(state.getCreditQueueSize()).toBe(0)
 	})
 
+	test('a company IGDB lists twice on a game gets one credit', async () => {
+		state.setEntity('org', 10, ORG(10))
+		state.enqueueCredits(1, [dev(100, 10), { id: 101, company: { id: 10, name: 'Studio 10' }, publisher: true }])
+		const w = world()
+		const r = await run(w)
+		expect(r.written).toBe(1)
+		const writes = w.atproto.applyCreates.mock.calls[0]![0] as unknown as Array<{ record: { roles: string[] } }>
+		expect(writes).toHaveLength(1)
+		expect(writes[0]!.record.roles).toEqual(['developer', 'publisher'])
+		expect(state.hasEntity('orgCredit', 100) && state.hasEntity('orgCredit', 101)).toBe(true)
+		expect(state.getCreditQueueSize()).toBe(0)
+	})
+
+	test('a game that keeps failing is dropped after maxAttempts', async () => {
+		state.setEntity('org', 10, ORG(10))
+		state.enqueueCredits(1, [dev(100, 10)])
+		const w = world()
+		w.atproto.applyCreates.mockRejectedValue(new Error('script error'))
+		for (let i = 1; i < OPTIONS.maxAttempts; i++) await run(w)
+		expect(state.getCreditQueueSize()).toBe(1)
+		await run(w)
+		expect(state.getCreditQueueSize()).toBe(0)
+	})
+
 	test('a backfill never overwrites companies the game pass queued', () => {
 		state.enqueueCredits(1, [dev(100, 10)])
 		state.enqueueCredits(1, null)

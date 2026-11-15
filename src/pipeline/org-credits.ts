@@ -172,27 +172,38 @@ export async function syncOrgCredits(
 				const stored = await contributions.getGameRecord(game.uri)
 				if (!stored?.cid) throw new Error(`getGame found ${game.uri} for IGDB ${igdbId}, but its record could not be read`)
 
-				const writes: Array<{ ic: IGDBInvolvedCompany; rkey: string; record: Record<string, unknown> }> = []
+				// One credit per company: a company IGDB lists twice on a game
+				// gets one credit (one rkey) with both rows' roles.
+				const writes: Array<{ ics: IGDBInvolvedCompany[]; rkey: string; record: Record<string, unknown> }> = []
+				let waitingOrg = 0
 				for (const ic of todo) {
+					const rkey = creditRkey(game.uri, companyOf(ic).id!)
+					const same = writes.find((w) => w.rkey === rkey)
+					if (same) {
+						const roles = (mapOrgCredit(ic, game.uri, stored.cid)?.roles ?? []) as string[]
+						same.record.roles = [...new Set([...(same.record.roles as string[]), ...roles])]
+						same.ics.push(ic)
+						continue
+					}
 					const org = await orgRef(companyOf(ic).id!)
-					if (!org) continue
-					const record = mapOrgCredit(ic, game.uri, stored.cid, org)
-					if (record) writes.push({ ic, rkey: creditRkey(game.uri, companyOf(ic).id!), record })
+					const record = org && mapOrgCredit(ic, game.uri, stored.cid, org)
+					if (record) writes.push({ ics: [ic], rkey, record })
+					else waitingOrg++
 				}
 
 				if (writes.length > 0) {
 					const created = await atproto.applyCreates(writes.map((w) => ({ collection: COLLECTION, rkey: w.rkey, record: w.record })))
 					writes.forEach((w, i) => {
-						state.setEntity('orgCredit', w.ic.id, created[i]?.uri ?? `at://${catalogueDid}/${COLLECTION}/${w.rkey}`)
+						for (const ic of w.ics) state.setEntity('orgCredit', ic.id, created[i]?.uri ?? `at://${catalogueDid}/${COLLECTION}/${w.rkey}`)
 					})
 					result.written += writes.length
 					console.log(`  [credits] Game ${igdbId}: ${writes.length} credit(s) (${game.uri})`)
 				}
 
-				if (writes.length === todo.length) {
+				if (waitingOrg === 0) {
 					state.dequeueCredits(igdbId)
 				} else {
-					keepWaiting(igdbId, `${todo.length - writes.length} compan(ies) without an org profile`)
+					keepWaiting(igdbId, `${waitingOrg} compan(ies) without an org profile`)
 				}
 			} catch (err) {
 				result.failed++
@@ -202,7 +213,7 @@ export async function syncOrgCredits(
 					result.systemic++
 					throw new StopStep(`systemic failure on game ${igdbId}: ${message}`)
 				}
-				state.bumpCreditAttempts(igdbId, message)
+				keepWaiting(igdbId, message)
 				failures.push(message)
 				const tripped = breakerTrips(failures, lookups, options.breaker)
 				if (tripped) {
