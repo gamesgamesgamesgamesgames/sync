@@ -304,6 +304,33 @@ export class ContributionClient {
 	}
 
 	/**
+	 * Call a maintenance procedure that queues a HappyView job (syncWikidata,
+	 * refreshPublisherCounts, reindexSearchGames). These answer with the job
+	 * already pending or running, rather than a second one, so a retried POST
+	 * is safe. The account must be in the MAINTENANCE_DIDS script variable.
+	 */
+	async queueMaintenanceJob(nsid: string, input: Record<string, unknown>): Promise<{ jobId: string; alreadyQueued: boolean; status?: string }> {
+		if (!this.session) {
+			throw new Error('Not authenticated — call restore() first')
+		}
+		const session = this.session
+		const name = nsid.split('.').pop() ?? nsid
+		const response = await fetchWithRetry(name, () => session.fetchHandler(
+			`${this.instanceUrl}/xrpc/${nsid}`,
+			{
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(input),
+			},
+		), this.retry)
+		if (!response.ok) {
+			throw new ContributionRequestError(name, response.status, await response.text())
+		}
+		const { jobId, alreadyQueued, status } = await response.json() as { jobId: string; alreadyQueued?: boolean; status?: string }
+		return { jobId, alreadyQueued: alreadyQueued === true, ...(status ? { status } : {}) }
+	}
+
+	/**
 	 * Whether an already-queued sweep has been running so long that its worker
 	 * is probably stuck. A sweep chains jobs of at most 5000 rows each, so no
 	 * single job should run for a day.

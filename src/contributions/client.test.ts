@@ -160,6 +160,40 @@ describe('ContributionClient.getGameRecord', () => {
 	})
 })
 
+describe('ContributionClient.queueMaintenanceJob', () => {
+	function withSession(fetchHandler: (url: string, init: RequestInit) => Promise<Response>) {
+		const c = client(vi.fn() as unknown as typeof fetch)
+		;(c as unknown as { session: unknown }).session = { did: 'did:plc:sync', fetchHandler: vi.fn(fetchHandler) }
+		return c
+	}
+
+	test('posts the input to the procedure and returns the job id', async () => {
+		let seen: { url: string; body: unknown } | undefined
+		const c = withSession(async (url, init) => {
+			seen = { url, body: JSON.parse(String(init.body)) }
+			return json(200, { jobId: 'job-7' })
+		})
+		expect(await c.queueMaintenanceJob('games.gamesgamesgamesgames.syncWikidata', { dryRun: true })).toEqual({ jobId: 'job-7', alreadyQueued: false })
+		expect(seen?.url).toBe('https://hv.test/xrpc/games.gamesgamesgamesgames.syncWikidata')
+		expect(seen?.body).toEqual({ dryRun: true })
+	})
+
+	test('reports a job that was already pending or running', async () => {
+		const c = withSession(async () => json(200, { jobId: 'job-1', alreadyQueued: true, status: 'running' }))
+		expect(await c.queueMaintenanceJob('games.gamesgamesgamesgames.refreshPublisherCounts', {})).toEqual({ jobId: 'job-1', alreadyQueued: true, status: 'running' })
+	})
+
+	test('throws on a refusal, naming the procedure', async () => {
+		const c = withSession(async () => json(400, { error: 'InvalidRequest', message: 'unauthorized' }))
+		await expect(c.queueMaintenanceJob('games.gamesgamesgamesgames.reindexSearchGames', {})).rejects.toThrow(/reindexSearchGames returned 400/)
+	})
+
+	test('needs a restored session', async () => {
+		const c = client(vi.fn() as unknown as typeof fetch)
+		await expect(c.queueMaintenanceJob('games.gamesgamesgamesgames.syncWikidata', {})).rejects.toThrow(/restore/)
+	})
+})
+
 describe('ContributionClient.queueAutoAcceptSweep', () => {
 	function withSession(fetchHandler: (url: string, init: RequestInit) => Promise<Response>) {
 		const c = client(vi.fn() as unknown as typeof fetch)
