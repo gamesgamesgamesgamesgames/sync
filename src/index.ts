@@ -1,8 +1,12 @@
 /**
  * IGDB → atproto scraper
  *
- * Fetches game data from IGDB and creates atproto records
- * in the @gamesgamesgamesgames.games repo.
+ * Full IGDB scrape for the non-game catalogue records: platform families,
+ * platforms, engines, collections and franchises, plus org credits for games
+ * already in state. Writes to the @gamesgamesgamesgames.games repo.
+ *
+ * It never creates or updates game records. Games arrive through the nightly
+ * sync (src/sync.ts) as contributions, which auto-accept applies.
  *
  * Supports resume — if interrupted, re-run to pick up where it left off.
  *
@@ -20,7 +24,6 @@ import { StateManager } from './state.js'
 import { scrapePlatformFamilies, scrapePlatforms } from './pipeline/platforms.js'
 import { scrapeEngines } from './pipeline/engines.js'
 import { scrapeCollections } from './pipeline/collections.js'
-import { scrapeGames, syncGames } from './pipeline/games.js'
 import { scrapeCredits } from './pipeline/credits.js'
 
 async function main() {
@@ -92,19 +95,12 @@ async function main() {
 	}
 	await scrapeCollections(igdb, atproto, state)
 
-	// Phase 5: Games
-	if (!state.isPhaseDone('games')) {
-		state.setPhase('games')
-	}
-	await scrapeGames(igdb, atproto, state)
+	// Games are not created or updated here. New and changed IGDB games reach
+	// the catalogue as contributions from the nightly sync (src/sync.ts), which
+	// auto-accept applies with a slug. Writing game records straight to the PDS
+	// skipped slug assignment and contribution history.
 
-	// Phase 6: Sync Games (update existing records with IGDB data)
-	if (!state.isPhaseDone('syncGames')) {
-		state.setPhase('syncGames')
-	}
-	await syncGames(igdb, atproto, state)
-
-	// Phase 7: Org Credits
+	// Phase 5: Org Credits (for games already in state)
 	if (!state.isPhaseDone('credits')) {
 		state.setPhase('credits')
 	}
