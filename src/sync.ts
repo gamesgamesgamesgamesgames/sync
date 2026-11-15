@@ -30,7 +30,7 @@ import { ContributionClient } from './contributions/client.js'
 import { syncNewCompanies } from './pipeline/sync-companies.js'
 import { slugify } from './helpers.js'
 import { MirroringBlobUploader, assertCatalogueAccount, restoreContributorBlobs } from './media.js'
-import { igdbIdsArg, readIgdbIds, syncPasses } from './igdb-ids.js'
+import { assertStateForIgdbIds, igdbIdsArg, readIgdbIds, syncPasses } from './igdb-ids.js'
 import type {
 	// IGDBPlatformFamily,
 	IGDBPlatform,
@@ -94,6 +94,7 @@ async function main() {
 	await contributionClient.restore(IGDB_ATPROTO_DID)
 
 	const state = new StateManager()
+	if (igdbIds) assertStateForIgdbIds(state)
 
 	// Runs that need a human end with a non-zero exit, so systemd OnFailure
 	// can alert on them.

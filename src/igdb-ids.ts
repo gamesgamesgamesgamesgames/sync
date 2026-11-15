@@ -19,6 +19,18 @@ export function syncPasses(igdbIds: number[] | undefined): Set<SyncPass> {
 	return new Set(igdbIds ? ['game'] : NIGHTLY_PASSES)
 }
 
+/**
+ * A targeted run needs the state DB a nightly run has built: without it
+ * every game looks new and its references to platforms, companies and the
+ * rest can't be resolved. No game cursor means no such run, which usually
+ * means the wrong working directory (STATE_FILE is relative).
+ */
+export function assertStateForIgdbIds(state: { getLastSyncAt(type: 'game'): number | null }): void {
+	if (!state.getLastSyncAt('game')) {
+		throw new Error(`--igdb-ids: the state DB in ${process.cwd()} has no last_sync_game; run from the sync's own directory, after a nightly run`)
+	}
+}
+
 /** The value of `--igdb-ids <file>` or `--igdb-ids=<file>`, if given. */
 export function igdbIdsArg(argv: string[]): string | undefined {
 	for (let i = 0; i < argv.length; i++) {

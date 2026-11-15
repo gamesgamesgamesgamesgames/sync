@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { igdbIdsArg, readIgdbIds, syncPasses } from './igdb-ids.js'
+import { assertStateForIgdbIds, igdbIdsArg, readIgdbIds, syncPasses } from './igdb-ids.js'
 
 describe('syncPasses', () => {
 	test('a targeted run is the game pass only, with no sweep', () => {
@@ -58,5 +58,15 @@ describe('readIgdbIds', () => {
 
 	test.each(['abc', '0', '-5', '1.5', '12 34', '1e3', 'id', '99999999999999999999'])('refuses a bad id: %s', (bad) => {
 		expect(() => readIgdbIds(file(`1\n${bad}\n3\n`))).toThrow(/line 2 is not an IGDB id/)
+	})
+})
+
+describe('assertStateForIgdbIds', () => {
+	test('refuses a state DB with no game cursor', () => {
+		expect(() => assertStateForIgdbIds({ getLastSyncAt: () => null })).toThrow(/no last_sync_game/)
+	})
+
+	test('accepts one a nightly run has built', () => {
+		expect(() => assertStateForIgdbIds({ getLastSyncAt: () => 1_781_308_800 })).not.toThrow()
 	})
 })

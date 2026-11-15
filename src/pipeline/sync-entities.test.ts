@@ -611,7 +611,7 @@ describe('syncEntityType with igdbIds', () => {
 		expect(state.getLastSyncAt('game')).toBe(PREVIOUS_CURSOR)
 	})
 
-	test('leaves streaks and the breaker count alone, and ignores a stale cursor', async () => {
+	test('charges no failed run to a streak, leaves the breaker count alone, and ignores a stale cursor', async () => {
 		state.setLastSyncAt('game', PREVIOUS_CURSOR) // months old: the nightly run would alert
 		state.setMeta('breaker_trips_game', '2')
 		const { igdb } = recordingIgdb()

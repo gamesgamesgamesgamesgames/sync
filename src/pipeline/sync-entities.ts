@@ -34,8 +34,10 @@ export interface SyncEntityConfig<T extends { id: number }> {
 	/**
 	 * Sync exactly these IGDB ids, in pages of IGDB_IDS_PAGE_SIZE, instead of
 	 * what changed since the cursor. Every id is mapped, even ones already in
-	 * state. The run never writes the cursor or the breaker and streak
-	 * bookkeeping, so the nightly run is unaffected. startOffset is ignored.
+	 * state. The run never writes the cursor or the breaker count, and
+	 * doesn't charge failed runs to streaks. Successes and permanent
+	 * failures still clear a game's streak, and permanent failures still go
+	 * to `failures`, as in a nightly run. startOffset is ignored.
 	 */
 	igdbIds?: number[]
 	/** Return the slug for this item, if any. When set, the slug is written via HappyView's putGame XRPC. */
@@ -601,8 +603,8 @@ export async function syncEntityType<T extends { id: number }>(
 	}
 
 	if (targeted) {
-		// A one-off run's failures say nothing about the nightly run, so its
-		// breaker count and the games' streaks are left as they were.
+		// A one-off run's failures say nothing about the nightly run, so the
+		// breaker count is left alone and no failed run is charged to a streak.
 		if (tripped) {
 			result.systemic++
 			console.error(`[sync] [ALERT] ${entityType}: ${tripped}`)
