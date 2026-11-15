@@ -93,14 +93,14 @@ describe('syncOrgCredits', () => {
 		state.setEntity('orgCredit', 100, 'at://x/c/old')
 		state.enqueueCredits(1, [dev(100, 10), dev(101, 11), dev(102, 12, 'Nintendo'), dev(103, 13)])
 		state.setEntity('org', 13, ORG(13))
-		const w = world({ credits: { 1: [{ orgUri: ORG(11), uri: 'at://x/c/11' }, { displayName: 'Nintendo', uri: 'at://x/c/12' }] } })
+		const w = world({ credits: { 1: [{ orgUri: ORG(11), uri: `at://${CATALOGUE}/${COLLECTION}/c11` }, { displayName: 'Nintendo', uri: `at://${CATALOGUE}/${COLLECTION}/c12` }] } })
 		const r = await run(w)
 		expect(r.existing).toBe(3)
 		expect(r.written).toBe(1)
 		const writes = w.atproto.applyCreates.mock.calls[0]![0] as unknown as Array<{ record: { org: { uri: string } } }>
 		expect(writes.map((x) => x.record.org.uri)).toEqual([ORG(13)])
-		expect(state.getEntity('orgCredit', 101)).toBe('at://x/c/11')
-		expect(state.getEntity('orgCredit', 102)).toBe('at://x/c/12')
+		expect(state.getEntity('orgCredit', 101)).toBe(`at://${CATALOGUE}/${COLLECTION}/c11`)
+		expect(state.getEntity('orgCredit', 102)).toBe(`at://${CATALOGUE}/${COLLECTION}/c12`)
 	})
 
 	test('a second run writes nothing', async () => {
@@ -203,6 +203,36 @@ describe('syncOrgCredits', () => {
 		expect(state.getCreditQueueSize()).toBe(1)
 		await run(w)
 		expect(state.getCreditQueueSize()).toBe(0)
+	})
+
+	test('only catalogue credits count', async () => {
+		state.setEntity('org', 10, ORG(10))
+		state.enqueueCredits(1, [dev(100, 10, 'Grezzo')])
+		const w = world({ credits: { 1: [{ orgUri: ORG(10), displayName: 'Grezzo', uri: 'at://did:plc:someone/games.gamesgamesgamesgames.org.credit/x' }] } })
+		const r = await run(w)
+		expect(r.existing).toBe(0)
+		expect(r.written).toBe(1)
+	})
+
+	test('a waiting game moves to the back of the queue', async () => {
+		state.setEntity('org', 10, ORG(10))
+		state.enqueueCredits(9, [dev(100, 10)], 1000) // no catalogue game yet
+		state.enqueueCredits(1, [dev(101, 10)], 2000)
+		const w = world({ games: [1] })
+		await run(w, { maxGames: 1 })
+		expect(state.getCreditQueue(10).map((q) => q.igdbId)).toEqual([1, 9])
+		await run(w, { maxGames: 1 })
+		expect(w.atproto.applyCreates).toHaveBeenCalledTimes(1)
+	})
+
+	test('re-queueing the same companies keeps the attempts; new companies reset them', () => {
+		state.enqueueCredits(1, [dev(100, 10)])
+		state.bumpCreditAttempts(1, 'no catalogue game yet')
+		state.bumpCreditAttempts(1, 'no catalogue game yet')
+		state.enqueueCredits(1, [dev(100, 10)])
+		expect(state.getCreditQueue(1)[0]!.attempts).toBe(2)
+		state.enqueueCredits(1, [dev(100, 10), dev(101, 11)])
+		expect(state.getCreditQueue(1)[0]!.attempts).toBe(0)
 	})
 
 	test('a backfill never overwrites companies the game pass queued', () => {

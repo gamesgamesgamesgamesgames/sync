@@ -113,6 +113,7 @@ export async function syncOrgCredits(
 	let lookups = 0
 
 	const keepWaiting = (igdbId: number, why: string) => {
+		// To the back of the queue, so waiting games don't hold the front.
 		const attempts = state.bumpCreditAttempts(igdbId, why)
 		if (attempts >= options.maxAttempts) {
 			console.warn(`  [credits] Game ${igdbId}: ${why} after ${attempts} runs; dropping it from the queue`)
@@ -150,7 +151,8 @@ export async function syncOrgCredits(
 					continue
 				}
 
-				const listed = (game.record.orgCredits ?? []) as ExistingCredit[]
+				// Only catalogue credits count.
+				const listed = ((game.record.orgCredits ?? []) as ExistingCredit[]).filter((c) => c.uri?.startsWith(`at://${catalogueDid}/`))
 				const todo: IGDBInvolvedCompany[] = []
 				for (const ic of wanted) {
 					const { id, name } = companyOf(ic)

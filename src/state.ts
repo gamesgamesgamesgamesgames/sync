@@ -537,7 +537,8 @@ export class StateManager {
 	/** Close the database connection. */
 	/**
 	 * Queue a game for the org-credits step. Given involved companies replace
-	 * what was queued and reset its attempts; null (a backfill) keeps them.
+	 * what was queued, and reset its attempts only if they changed; null (a
+	 * backfill) keeps them.
 	 */
 	enqueueCredits(igdbId: number, involved: unknown[] | null, now = Math.floor(Date.now() / 1000)): void {
 		if (involved === null) {
@@ -546,7 +547,10 @@ export class StateManager {
 		}
 		this.db.prepare(`
 			INSERT INTO credit_queue (igdb_id, involved, enqueued_at) VALUES (?, ?, ?)
-			ON CONFLICT (igdb_id) DO UPDATE SET involved = excluded.involved, attempts = 0, last_error = NULL
+			ON CONFLICT (igdb_id) DO UPDATE SET
+				attempts = CASE WHEN credit_queue.involved IS excluded.involved THEN credit_queue.attempts ELSE 0 END,
+				last_error = CASE WHEN credit_queue.involved IS excluded.involved THEN credit_queue.last_error ELSE NULL END,
+				involved = excluded.involved
 		`).run(igdbId, JSON.stringify(involved), now)
 	}
 
@@ -560,9 +564,9 @@ export class StateManager {
 		this.db.prepare('UPDATE credit_queue SET involved = ? WHERE igdb_id = ?').run(JSON.stringify(involved), igdbId)
 	}
 
-	/** Count one more run this game stayed queued; returns the new count. */
-	bumpCreditAttempts(igdbId: number, error: string): number {
-		this.db.prepare('UPDATE credit_queue SET attempts = attempts + 1, last_error = ? WHERE igdb_id = ?').run(error, igdbId)
+	/** Count one more run this game stayed queued, and move it to the back; returns the new count. */
+	bumpCreditAttempts(igdbId: number, error: string, now = Math.floor(Date.now() / 1000)): number {
+		this.db.prepare('UPDATE credit_queue SET attempts = attempts + 1, last_error = ?, enqueued_at = MAX(enqueued_at + 1, ?) WHERE igdb_id = ?').run(error, now, igdbId)
 		const row = this.db.prepare('SELECT attempts FROM credit_queue WHERE igdb_id = ?').get(igdbId) as { attempts: number } | undefined
 		return row?.attempts ?? 0
 	}
