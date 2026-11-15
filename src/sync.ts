@@ -7,6 +7,7 @@
  * Usage:
  *   npx tsx src/sync.ts
  *   npx tsx src/sync.ts --igdb-ids <file>   # one-shot: just these games, one id per line
+ *   npx tsx src/sync.ts --backfill-credits <file>   # one-shot: org credits for these games, one id per line
  *
  * Cron:
  *   0 4 * * * cd /root/igdb-scrape && npx tsx src/sync.ts >> sync.log 2>&1
@@ -28,6 +29,7 @@ import {
 import { needsAttention, syncEntityType, type SyncEntityConfig, type SyncResult } from './pipeline/sync-entities.js'
 import { ContributionClient } from './contributions/client.js'
 import { syncNewCompanies } from './pipeline/sync-companies.js'
+import { syncOrgCredits } from './pipeline/org-credits.js'
 import { slugify } from './helpers.js'
 import { MirroringBlobUploader, assertCatalogueAccount, restoreContributorBlobs } from './media.js'
 import { assertStateForIgdbIds, igdbIdsArg, readIgdbIds, syncPasses } from './igdb-ids.js'
@@ -44,7 +46,9 @@ async function main() {
 	// Checked first, so a bad file fails before anything logs in.
 	const idsFile = igdbIdsArg(process.argv.slice(2))
 	const igdbIds = idsFile ? readIgdbIds(idsFile) : undefined
-	const passes = syncPasses(igdbIds)
+	const creditsFile = igdbIdsArg(process.argv.slice(2), '--backfill-credits')
+	const creditIds = creditsFile ? readIgdbIds(creditsFile, '--backfill-credits') : undefined
+	const passes = syncPasses(igdbIds, creditIds)
 
 	const {
 		TWITCH_CLIENT_ID,
@@ -94,7 +98,7 @@ async function main() {
 	await contributionClient.restore(IGDB_ATPROTO_DID)
 
 	const state = new StateManager()
-	if (igdbIds) assertStateForIgdbIds(state)
+	if (igdbIds || creditIds) assertStateForIgdbIds(state)
 
 	// Runs that need a human end with a non-zero exit, so systemd OnFailure
 	// can alert on them.
@@ -118,7 +122,9 @@ async function main() {
 	process.on('SIGINT', shutdown)
 	process.on('SIGTERM', shutdown)
 
-	console.log(igdbIds ? `=== IGDB → atproto Targeted Sync (${igdbIds.length} games from ${idsFile}) ===` : '=== IGDB → atproto Nightly Sync ===')
+	console.log(igdbIds ? `=== IGDB → atproto Targeted Sync (${igdbIds.length} games from ${idsFile}) ===`
+		: creditIds ? `=== IGDB → atproto Credits Backfill (${creditIds.length} games from ${creditsFile}) ===`
+		: '=== IGDB → atproto Nightly Sync ===')
 	console.log(`Started at ${new Date().toISOString()}`)
 	console.log()
 
@@ -223,10 +229,16 @@ async function main() {
 				}
 			}
 
-			return mapGame(item, igdb, atproto, state, { existingMedia, blobUploader })
+			const record = await mapGame(item, igdb, atproto, state, { existingMedia, blobUploader })
+			// The credits step writes this game's org.credit records once its
+			// catalogue game exists.
+			if (passes.has('orgCredits') && item.involved_companies?.length) {
+				state.enqueueCredits(item.id, item.involved_companies)
+			}
+			return record
 		},
 	}
-	track('game', await syncEntityType(gameConfig, igdb, atproto, state))
+	if (passes.has('game')) track('game', await syncEntityType(gameConfig, igdb, atproto, state))
 
 	// 5. Collections (IGDB collections → type: "series") — after games so game URIs are available
 	const collectionConfig: SyncEntityConfig<IGDBCollection> = {
@@ -254,7 +266,26 @@ async function main() {
 	//    encountered in game updates that don't have profiles yet.
 	if (passes.has('companies')) await syncNewCompanies(igdb, atproto, state)
 
-	// 8. Queue a sweep of our own pending contributions, so media deferrals
+	// 8. Org credits for queued games whose catalogue game exists, after the
+	//    company sync so new companies have profiles to point at. Capped per
+	//    run to stay inside the catalogue PDS's write limits; what's left
+	//    stays queued for the next run.
+	if (passes.has('orgCredits')) {
+		for (const id of creditIds ?? []) state.enqueueCredits(id, null)
+		const credits = await syncOrgCredits(igdb, atproto, contributionClient, state, {
+			maxGames: envNumber('SYNC_CREDIT_MAX_GAMES', creditIds ? Number.MAX_SAFE_INTEGER : 5000),
+			maxWrites: envNumber('SYNC_CREDIT_MAX_WRITES', creditIds ? 20000 : 2000),
+			maxAttempts: envNumber('SYNC_CREDIT_MAX_ATTEMPTS', 7),
+			breaker: {
+				ratio: envNumber('SYNC_ENTITY_FAILURE_RATIO', 0.2),
+				minFailures: envNumber('SYNC_BREAKER_MIN_FAILURES', 5),
+				sameError: envNumber('SYNC_BREAKER_SAME_ERROR', 10),
+			},
+		})
+		if (credits.aborted) attention.push(`org credits: ${credits.aborted}`)
+	}
+
+	// 9. Queue a sweep of our own pending contributions, so media deferrals
 	//    and failed auto-accept jobs get retried once a night. Best effort: a
 	//    failure here only needs attention, it loses nothing.
 	if (passes.has('autoAcceptSweep')) {
@@ -285,6 +316,11 @@ async function main() {
 		console.error(`[sync] [ALERT] This run needs attention: ${attention.join('; ')}`)
 		process.exitCode = 1
 	}
+}
+
+function envNumber(name: string, fallback: number): number {
+	const value = Number(process.env[name])
+	return Number.isFinite(value) && value > 0 ? value : fallback
 }
 
 main().catch((err) => {

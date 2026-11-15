@@ -142,6 +142,16 @@ export class StateManager {
 				enriched_at INTEGER
 			);
 
+			-- Games whose org.credit records still need writing. involved is the
+			-- game's IGDB involved_companies as JSON, or NULL until fetched.
+			CREATE TABLE IF NOT EXISTS credit_queue (
+				igdb_id INTEGER PRIMARY KEY,
+				involved TEXT,
+				enqueued_at INTEGER NOT NULL,
+				attempts INTEGER NOT NULL DEFAULT 0,
+				last_error TEXT
+			);
+
 			CREATE TABLE IF NOT EXISTS transformer_progress (
 				name TEXT NOT NULL,
 				entity_type TEXT NOT NULL,
@@ -525,6 +535,46 @@ export class StateManager {
 	}
 
 	/** Close the database connection. */
+	/**
+	 * Queue a game for the org-credits step. Given involved companies replace
+	 * what was queued and reset its attempts; null (a backfill) keeps them.
+	 */
+	enqueueCredits(igdbId: number, involved: unknown[] | null, now = Math.floor(Date.now() / 1000)): void {
+		if (involved === null) {
+			this.db.prepare('INSERT OR IGNORE INTO credit_queue (igdb_id, involved, enqueued_at) VALUES (?, NULL, ?)').run(igdbId, now)
+			return
+		}
+		this.db.prepare(`
+			INSERT INTO credit_queue (igdb_id, involved, enqueued_at) VALUES (?, ?, ?)
+			ON CONFLICT (igdb_id) DO UPDATE SET involved = excluded.involved, attempts = 0, last_error = NULL
+		`).run(igdbId, JSON.stringify(involved), now)
+	}
+
+	/** The oldest queued games first. */
+	getCreditQueue(limit: number): Array<{ igdbId: number; involved: unknown[] | null; attempts: number }> {
+		const rows = this.db.prepare('SELECT igdb_id, involved, attempts FROM credit_queue ORDER BY enqueued_at, igdb_id LIMIT ?').all(limit) as Array<{ igdb_id: number; involved: string | null; attempts: number }>
+		return rows.map((r) => ({ igdbId: r.igdb_id, involved: r.involved === null ? null : JSON.parse(r.involved), attempts: r.attempts }))
+	}
+
+	setCreditInvolved(igdbId: number, involved: unknown[]): void {
+		this.db.prepare('UPDATE credit_queue SET involved = ? WHERE igdb_id = ?').run(JSON.stringify(involved), igdbId)
+	}
+
+	/** Count one more run this game stayed queued; returns the new count. */
+	bumpCreditAttempts(igdbId: number, error: string): number {
+		this.db.prepare('UPDATE credit_queue SET attempts = attempts + 1, last_error = ? WHERE igdb_id = ?').run(error, igdbId)
+		const row = this.db.prepare('SELECT attempts FROM credit_queue WHERE igdb_id = ?').get(igdbId) as { attempts: number } | undefined
+		return row?.attempts ?? 0
+	}
+
+	dequeueCredits(igdbId: number): void {
+		this.db.prepare('DELETE FROM credit_queue WHERE igdb_id = ?').run(igdbId)
+	}
+
+	getCreditQueueSize(): number {
+		return (this.db.prepare('SELECT COUNT(*) AS n FROM credit_queue').get() as { n: number }).n
+	}
+
 	close(): void {
 		this.db.close()
 	}

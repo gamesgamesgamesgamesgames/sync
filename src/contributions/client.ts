@@ -144,8 +144,8 @@ export class ContributionClient {
 		}
 	}
 
-	async getGameByIgdbId(igdbId: string): Promise<GameLookupResult | null> {
-		const url = `${this.instanceUrl}/xrpc/games.gamesgamesgamesgames.getGame?igdbId=${encodeURIComponent(igdbId)}`
+	async getGameByIgdbId(igdbId: string, options: { includeOrgCredits?: boolean } = {}): Promise<GameLookupResult | null> {
+		const url = `${this.instanceUrl}/xrpc/games.gamesgamesgamesgames.getGame?igdbId=${encodeURIComponent(igdbId)}${options.includeOrgCredits ? '&includeOrgCredits=true' : ''}`
 		const response = await fetchWithRetry('getGame', () => this.fetchImpl(url, {
 			headers: { 'X-Client-Key': this.clientKey },
 		}), this.retry)

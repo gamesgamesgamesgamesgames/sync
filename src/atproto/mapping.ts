@@ -628,6 +628,7 @@ export function mapOrgCredit(
 	ic: IGDBInvolvedCompany,
 	gameUri: string,
 	gameCid: string,
+	org?: { uri: string; cid: string },
 ): Record<string, unknown> | null {
 	const companyId = typeof ic.company === 'object' ? ic.company?.id : ic.company
 	const companyName = typeof ic.company === 'object' ? ic.company?.name : undefined
@@ -643,6 +644,7 @@ export function mapOrgCredit(
 	if (roles.length === 0) return null
 
 	return {
+		...(org ? { org: { uri: org.uri, cid: org.cid } } : {}),
 		game: {
 			uri: gameUri,
 			cid: gameCid,
