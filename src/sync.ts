@@ -30,6 +30,7 @@ import { needsAttention, syncEntityType, type SyncEntityConfig, type SyncResult 
 import { ContributionClient } from './contributions/client.js'
 import { syncNewCompanies } from './pipeline/sync-companies.js'
 import { syncOrgCredits } from './pipeline/org-credits.js'
+import { heldGamesReport, heldGamesToRecheck, trackHeldGames } from './held-games.js'
 import { slugify } from './helpers.js'
 import { MirroringBlobUploader, assertCatalogueAccount, restoreContributorBlobs } from './media.js'
 import { assertStateForIgdbIds, igdbIdsArg, readIgdbIds, syncPasses } from './igdb-ids.js'
@@ -173,9 +174,12 @@ async function main() {
 	// await syncEntityType(engineConfig, igdb, atproto, state)
 
 	// 4. Games
+	// Each mapped game's IGDB game_type, for held_games.
+	const gameTypes = new Map<string, string | undefined>()
 	const gameConfig: SyncEntityConfig<IGDBGame> = {
 		entityType: 'game',
 		contributionClient,
+		onContributionResult: trackHeldGames(state, (key) => gameTypes.get(key)),
 		onMissingContributorBlobs: (imageIds) => imageIds.forEach((id) => state.clearBlobInContributor(id)),
 		isImageMirrored: (imageId, cid) => state.isBlobMirrored(imageId, cid),
 		restoreContributorBlobs: (refs) => restoreContributorBlobs(blobUploader, igdb, refs),
@@ -229,6 +233,7 @@ async function main() {
 				}
 			}
 
+			gameTypes.set(String(item.id), typeof item.game_type === 'object' ? item.game_type?.type : undefined)
 			const record = await mapGame(item, igdb, atproto, state, { existingMedia, blobUploader })
 			// The credits step writes this game's org.credit records once its
 			// catalogue game exists.
@@ -239,6 +244,14 @@ async function main() {
 		},
 	}
 	if (passes.has('game')) track('game', await syncEntityType(gameConfig, igdb, atproto, state))
+
+	// New games held for an unmapped game_type whose type maps now. The
+	// cursor has moved past them, so they're fetched by id.
+	const recheck = passes.has('game') && !igdbIds ? heldGamesToRecheck(state.getHeldGames()) : []
+	if (recheck.length > 0) {
+		console.log(`[sync] game: re-checking ${recheck.length} held game(s) whose game_type maps now`)
+		track('held game', await syncEntityType({ ...gameConfig, igdbIds: recheck }, igdb, atproto, state))
+	}
 
 	// 5. Collections (IGDB collections → type: "series") — after games so game URIs are available
 	const collectionConfig: SyncEntityConfig<IGDBCollection> = {
@@ -307,6 +320,12 @@ async function main() {
 
 	// Done
 	console.log()
+	const held = heldGamesReport(state.getHeldGames())
+	if (held) {
+		attention.push(held.attention)
+		console.warn(`[sync] [ALERT] ${held.attention}. Once they map, the next run proposes them; to do it now, rerun with --igdb-ids and these ids:\n${held.rerun}`)
+	}
+
 	console.log('=== Sync complete! ===')
 	console.log(`Finished at ${new Date().toISOString()}`)
 

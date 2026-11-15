@@ -418,6 +418,7 @@ export const IGDB_GAME_TYPE_MAP: Record<string, string> = {
 	'Port': 'port',
 	'Fork': 'fork',
 	'Pack': 'addon',
+	'Pack / Addon': 'addon',
 	'Update': 'update',
 }
 

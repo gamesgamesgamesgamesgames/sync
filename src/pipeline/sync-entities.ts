@@ -12,7 +12,7 @@ import type { StateManager, EntityType } from '../state.js'
 import { XRPCError } from '@atproto/xrpc'
 import { ContributionRequestError, RecordReadError, type ContributionClient } from '../contributions/client.js'
 import { PdsResolutionError } from '../atproto/pds-resolver.js'
-import { RecordUnreadableError, syncGameViaContribution, type SyncGameOptions } from '../contributions/handler.js'
+import { RecordUnreadableError, syncGameViaContribution, type ContributionSyncResult, type SyncGameOptions } from '../contributions/handler.js'
 import { errorLabel, prefetch } from '../helpers.js'
 import { flushBatch, type PendingRecord } from './batch.js'
 import { ConcurrencyPool } from '../concurrency.js'
@@ -56,6 +56,8 @@ export interface SyncEntityConfig<T extends { id: number }> {
 	restoreContributorBlobs?: SyncGameOptions['restoreContributorBlobs']
 	/** Told which blobs a created contribution references. */
 	onContributorBlobsReferenced?: SyncGameOptions['onContributorBlobsReferenced']
+	/** Told how each entity's contribution went (created, skipped or held). */
+	onContributionResult?: (key: string, action: ContributionSyncResult['action']) => void
 	/** Consecutive failed runs before an entity stops holding the cursor (default SYNC_MAX_FAILED_RUNS or 3). */
 	maxFailedRuns?: number
 	/** Warn when the cursor is older than this many hours (default SYNC_CURSOR_ALERT_HOURS or 72). */
@@ -432,6 +434,7 @@ export async function syncEntityType<T extends { id: number }>(
 						})
 
 						state.clearFailureStreak(entityType, key)
+						config.onContributionResult?.(key, syncResult.action)
 						if (syncResult.action === 'created') {
 							console.log(`  [contributions] ${syncResult.contributionType}: ${name} (${syncResult.uri})`)
 							result.created++

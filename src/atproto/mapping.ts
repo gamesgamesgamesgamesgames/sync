@@ -369,6 +369,28 @@ function extractExternalIds(igdb: IGDBGame): Record<string, unknown> {
 	return ids
 }
 
+const warnedGameTypes = new Set<string>()
+
+/**
+ * The lexicon applicationType for an IGDB game. game_type wins over the
+ * deprecated category enum. A game_type we don't know is not guessed from
+ * category (which defaults to 0, "game"): it returns undefined and warns once
+ * per type, so a correction leaves the stored type alone and a new game waits
+ * until the map knows the type.
+ */
+export function mapApplicationType(igdb: Pick<IGDBGame, 'id' | 'game_type' | 'category'>): string | undefined {
+	const gameType = typeof igdb.game_type === 'object' ? igdb.game_type?.type : undefined
+	if (gameType) {
+		const mapped = IGDB_GAME_TYPE_MAP[gameType]
+		if (!mapped && !warnedGameTypes.has(gameType)) {
+			warnedGameTypes.add(gameType)
+			console.warn(`[mapping] Unknown IGDB game_type ${JSON.stringify(gameType)} (first seen on game ${igdb.id}); leaving applicationType unset. Add it to IGDB_GAME_TYPE_MAP.`)
+		}
+		return mapped
+	}
+	return IGDB_GAME_CATEGORY_MAP[igdb.category ?? 0]
+}
+
 /** Map an IGDB Game → lexicon game record. */
 export async function mapGame(
 	igdb: IGDBGame,
@@ -386,10 +408,7 @@ export async function mapGame(
 	if (igdb.summary) record.summary = normalizeNewlines(igdb.summary)
 	if (igdb.storyline) record.storyline = normalizeNewlines(igdb.storyline)
 
-	// Application type — prefer game_type (new sub-resource) over deprecated category enum
-	const gameTypeStr = typeof igdb.game_type === 'object' ? igdb.game_type?.type : undefined
-	const appType = (gameTypeStr && IGDB_GAME_TYPE_MAP[gameTypeStr])
-		?? IGDB_GAME_CATEGORY_MAP[igdb.category ?? 0]
+	const appType = mapApplicationType(igdb)
 	if (appType) record.applicationType = appType
 
 	// Genres

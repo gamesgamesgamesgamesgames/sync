@@ -81,6 +81,27 @@ describe('syncGameViaContribution', () => {
 	})
 })
 
+describe('syncGameViaContribution without an applicationType', () => {
+	test('a new game is held, not proposed, since accepting it would fail', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {})
+		const client = fakeClient()
+		const result = await syncGameViaContribution('9', { name: 'Brand New', externalIds: { igdb: '9' } }, client)
+		expect(result.action).toBe('held')
+		expect(client.createContribution).not.toHaveBeenCalled()
+		vi.restoreAllMocks()
+	})
+
+	test('an existing game keeps its stored applicationType', async () => {
+		const client = fakeClient({
+			getGameByIgdbId: vi.fn(async () => ({ uri: GAME_URI, record: {} })),
+			getGameRecord: vi.fn(async () => ({ uri: GAME_URI, cid: 'bafybase', value: { name: 'Old Name', applicationType: 'game' } })),
+		})
+		await syncGameViaContribution('1', { name: 'New Name' }, client)
+		const params = (client.createContribution as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { changes: Record<string, unknown> }
+		expect(params.changes).toEqual({ name: 'New Name' })
+	})
+})
+
 describe('syncGameViaContribution unreadable records and owners', () => {
 	test('a game whose record the PDS cannot find throws a RecordUnreadableError', async () => {
 		const { RecordUnreadableError } = await import('./handler.js')
