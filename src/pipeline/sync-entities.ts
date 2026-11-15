@@ -31,6 +31,13 @@ export interface SyncEntityConfig<T extends { id: number }> {
 	concurrency?: number
 	/** IGDB pagination offset to start from — skips ahead in the full scan */
 	startOffset?: number
+	/**
+	 * Sync exactly these IGDB ids, in pages of IGDB_IDS_PAGE_SIZE, instead of
+	 * what changed since the cursor. Every id is mapped, even ones already in
+	 * state. The run never writes the cursor or the breaker and streak
+	 * bookkeeping, so the nightly run is unaffected. startOffset is ignored.
+	 */
+	igdbIds?: number[]
 	/** Return the slug for this item, if any. When set, the slug is written via HappyView's putGame XRPC. */
 	getSlug?: (item: T) => string | undefined
 	/** HappyView base URL for XRPC calls (e.g. slug writes via putGame). Required when getSlug is set. */
@@ -262,6 +269,18 @@ async function putSlugViaXrpc(happyviewUrl: string, apiKey: string, uri: string,
 	}
 }
 
+/** Ids per `where id = (…)` clause; also IGDB's page size, so each clause is one request. */
+export const IGDB_IDS_PAGE_SIZE = 500
+
+/** One IGDB `where` clause per page of IGDB_IDS_PAGE_SIZE ids. */
+export function igdbIdWhereClauses(ids: number[]): string[] {
+	const clauses: string[] = []
+	for (let i = 0; i < ids.length; i += IGDB_IDS_PAGE_SIZE) {
+		clauses.push(`where id = (${ids.slice(i, i + IGDB_IDS_PAGE_SIZE).join(',')});`)
+	}
+	return clauses
+}
+
 export async function syncEntityType<T extends { id: number }>(
 	config: SyncEntityConfig<T>,
 	igdb: IGDBClient,
@@ -272,13 +291,18 @@ export async function syncEntityType<T extends { id: number }>(
 	const getKey = config.getStateKey ?? ((item: T) => String(item.id))
 	const updateBatchSize = config.updateBatchSize ?? 200
 	const concurrency = config.concurrency ?? 1
-	const startOffset = config.startOffset ?? 0
+	const targeted = config.igdbIds !== undefined
+	const startOffset = targeted ? 0 : config.startOffset ?? 0
 
 	const syncStartedAt = Math.floor(Date.now() / 1000)
 	const lastSyncAt = state.getLastSyncAt(entityType)
+	// Whether to map entities already in state, rather than skip them as a full scan does.
+	const remap = targeted || !!lastSyncAt
 
 	let where = ''
-	if (lastSyncAt) {
+	if (targeted) {
+		console.log(`[sync] ${entityType}: targeted sync of ${config.igdbIds!.length} IGDB id(s); the cursor is left alone`)
+	} else if (lastSyncAt) {
 		where = `where updated_at > ${lastSyncAt};`
 		console.log(`[sync] ${entityType}: incremental sync (changes since ${new Date(lastSyncAt * 1000).toISOString()})`)
 	} else {
@@ -290,6 +314,7 @@ export async function syncEntityType<T extends { id: number }>(
 	const cursorAlertHours = config.cursorAlertHours ?? envNumber('SYNC_CURSOR_ALERT_HOURS', 72)
 	const entityFailureRatio = config.entityFailureRatio ?? envNumber('SYNC_ENTITY_FAILURE_RATIO', 0.2)
 	const entityFailures: Array<{ key: string; message: string }> = []
+	const retryKeys: string[] = []
 	const breakerMinFailures = config.breakerMinFailures ?? envNumber('SYNC_BREAKER_MIN_FAILURES', 5)
 	const breakerSameError = config.breakerSameError ?? envNumber('SYNC_BREAKER_SAME_ERROR', 10)
 	const maxBreakerTrips = config.maxBreakerTrips ?? envNumber('SYNC_BREAKER_MAX_TRIPS', 3)
@@ -300,7 +325,7 @@ export async function syncEntityType<T extends { id: number }>(
 	let writeAttempts = 0
 	const contributionClient = config.contributionClient && countingClient(config.contributionClient, () => { writeAttempts++ })
 
-	if (lastSyncAt) {
+	if (lastSyncAt && !targeted) {
 		const ageHours = (syncStartedAt - lastSyncAt) / 3600
 		if (ageHours > cursorAlertHours) {
 			result.cursorAlert = true
@@ -326,6 +351,7 @@ export async function syncEntityType<T extends { id: number }>(
 			return
 		}
 		result.retryable++
+		if (key) retryKeys.push(key)
 		if (kind === 'systemic') {
 			result.systemic++
 		} else if (key) {
@@ -343,8 +369,13 @@ export async function syncEntityType<T extends { id: number }>(
 		console.log(`[sync] ${entityType}: starting at offset ${startOffset}`)
 	}
 
+	const wheres = targeted ? igdbIdWhereClauses(config.igdbIds!) : [where]
+	async function* pages() {
+		for (const w of wheres) yield* igdb.paginate<T>(igdbEndpoint, igdbFields, startOffset, w)
+	}
+
 	try {
-		for await (const { items, offset } of prefetch(igdb.paginate<T>(igdbEndpoint, igdbFields, startOffset, where))) {
+		for await (const { items, offset } of prefetch(pages())) {
 			const batchStart = Date.now()
 			console.log(`  [sync] ${entityType}: got ${items.length} items at offset ${offset}`)
 
@@ -365,7 +396,7 @@ export async function syncEntityType<T extends { id: number }>(
 						const slug = config.getSlug?.(item)
 
 						// Full scan: skip mapRecord entirely for existing records
-						if (!lastSyncAt && existingUri) {
+						if (!remap && existingUri) {
 							return { key, record: null, existingUri, name: key, slug }
 						}
 
@@ -414,7 +445,7 @@ export async function syncEntityType<T extends { id: number }>(
 
 				// Direct write path (non-game entities) — existing logic unchanged
 				if (existingUri) {
-					if (!lastSyncAt || !record) {
+					if (!remap || !record) {
 						result.skipped++
 						continue
 					}
@@ -569,7 +600,14 @@ export async function syncEntityType<T extends { id: number }>(
 		}
 	}
 
-	if (tripped) {
+	if (targeted) {
+		// A one-off run's failures say nothing about the nightly run, so its
+		// breaker count and the games' streaks are left as they were.
+		if (tripped) {
+			result.systemic++
+			console.error(`[sync] [ALERT] ${entityType}: ${tripped}`)
+		}
+	} else if (tripped) {
 		result.systemic++
 		const trips = previousTrips + 1
 		state.setMeta(tripsKey, String(trips))
@@ -593,7 +631,11 @@ export async function syncEntityType<T extends { id: number }>(
 
 	// Moving the cursor past a failure drops that entity until IGDB touches it
 	// again, so only move it when nothing failed in a way a rerun could fix.
-	if (result.retryable === 0 && !result.aborted) {
+	if (targeted) {
+		if (result.retryable > 0) {
+			console.warn(`[sync] ${entityType}: ${result.retryable} retryable failure(s); rerun these ids: ${retryKeys.join(',')}`)
+		}
+	} else if (result.retryable === 0 && !result.aborted) {
 		state.setLastSyncAt(entityType, syncStartedAt)
 		result.cursorAdvanced = true
 	} else {

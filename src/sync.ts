@@ -6,6 +6,7 @@
  *
  * Usage:
  *   npx tsx src/sync.ts
+ *   npx tsx src/sync.ts --igdb-ids <file>   # one-shot: just these games, one id per line
  *
  * Cron:
  *   0 4 * * * cd /root/igdb-scrape && npx tsx src/sync.ts >> sync.log 2>&1
@@ -29,6 +30,7 @@ import { ContributionClient } from './contributions/client.js'
 import { syncNewCompanies } from './pipeline/sync-companies.js'
 import { slugify } from './helpers.js'
 import { MirroringBlobUploader, assertCatalogueAccount, restoreContributorBlobs } from './media.js'
+import { igdbIdsArg, readIgdbIds, syncPasses } from './igdb-ids.js'
 import type {
 	// IGDBPlatformFamily,
 	IGDBPlatform,
@@ -39,6 +41,11 @@ import type {
 } from './igdb/types.js'
 
 async function main() {
+	// Checked first, so a bad file fails before anything logs in.
+	const idsFile = igdbIdsArg(process.argv.slice(2))
+	const igdbIds = idsFile ? readIgdbIds(idsFile) : undefined
+	const passes = syncPasses(igdbIds)
+
 	const {
 		TWITCH_CLIENT_ID,
 		TWITCH_CLIENT_SECRET,
@@ -110,7 +117,7 @@ async function main() {
 	process.on('SIGINT', shutdown)
 	process.on('SIGTERM', shutdown)
 
-	console.log('=== IGDB → atproto Nightly Sync ===')
+	console.log(igdbIds ? `=== IGDB → atproto Targeted Sync (${igdbIds.length} games from ${idsFile}) ===` : '=== IGDB → atproto Nightly Sync ===')
 	console.log(`Started at ${new Date().toISOString()}`)
 	console.log()
 
@@ -142,7 +149,7 @@ async function main() {
 		collection: 'games.gamesgamesgamesgames.platform',
 		mapRecord: async (item) => mapPlatform(item, igdb, atproto, state),
 	}
-	track('platform', await syncEntityType(platformConfig, igdb, atproto, state))
+	if (passes.has('platform')) track('platform', await syncEntityType(platformConfig, igdb, atproto, state))
 
 	// // 3. Engines
 	// const engineConfig: SyncEntityConfig<IGDBGameEngine> = {
@@ -201,6 +208,7 @@ async function main() {
 		happyviewUrl: HAPPYVIEW_URL,
 		happyviewApiKey: process.env.HAPPYVIEW_API_KEY,
 		startOffset: state.getLastSyncAt('game') ? 0 : state.getEntityCount('game'),
+		igdbIds,
 		mapRecord: async (item) => {
 			// For existing games, fetch the current record for media comparison
 			const existingUri = state.getEntity('game', item.id)
@@ -228,7 +236,7 @@ async function main() {
 		getStateKey: (item) => `c_${item.id}`,
 		mapRecord: async (item) => mapCollection(item, state),
 	}
-	track('collection', await syncEntityType(collectionConfig, igdb, atproto, state))
+	if (passes.has('collection')) track('collection', await syncEntityType(collectionConfig, igdb, atproto, state))
 
 	// 6. Franchises (IGDB franchises → type: "franchise")
 	const franchiseConfig: SyncEntityConfig<IGDBFranchise> = {
@@ -239,28 +247,30 @@ async function main() {
 		getStateKey: (item) => `f_${item.id}`,
 		mapRecord: async (item) => mapFranchise(item, state),
 	}
-	track('franchise', await syncEntityType(franchiseConfig, igdb, atproto, state))
+	if (passes.has('franchise')) track('franchise', await syncEntityType(franchiseConfig, igdb, atproto, state))
 
 	// 7. Sync new companies — create org profiles for any companies
 	//    encountered in game updates that don't have profiles yet.
-	await syncNewCompanies(igdb, atproto, state)
+	if (passes.has('companies')) await syncNewCompanies(igdb, atproto, state)
 
 	// 8. Queue a sweep of our own pending contributions, so media deferrals
 	//    and failed auto-accept jobs get retried once a night. Best effort: a
 	//    failure here only needs attention, it loses nothing.
-	try {
-		const sweep = await contributionClient.queueAutoAcceptSweep()
-		if (ContributionClient.sweepLooksHung(sweep)) {
-			console.error(`[contributions] [ALERT] Auto-accept sweep ${sweep.jobId} has been running since ${sweep.startedAt}; the job worker is probably stuck`)
-			attention.push(`auto-accept sweep ${sweep.jobId} running since ${sweep.startedAt}`)
-		} else {
-			console.log(sweep.alreadyQueued
-				? `[contributions] Auto-accept sweep ${sweep.jobId} is still pending or running; not queueing another`
-				: `[contributions] Queued auto-accept sweep ${sweep.jobId}`)
+	if (passes.has('autoAcceptSweep')) {
+		try {
+			const sweep = await contributionClient.queueAutoAcceptSweep()
+			if (ContributionClient.sweepLooksHung(sweep)) {
+				console.error(`[contributions] [ALERT] Auto-accept sweep ${sweep.jobId} has been running since ${sweep.startedAt}; the job worker is probably stuck`)
+				attention.push(`auto-accept sweep ${sweep.jobId} running since ${sweep.startedAt}`)
+			} else {
+				console.log(sweep.alreadyQueued
+					? `[contributions] Auto-accept sweep ${sweep.jobId} is still pending or running; not queueing another`
+					: `[contributions] Queued auto-accept sweep ${sweep.jobId}`)
+			}
+		} catch (err) {
+			console.error('[contributions] Could not queue the auto-accept sweep:', (err as Error).message)
+			attention.push(`auto-accept sweep: ${(err as Error).message}`)
 		}
-	} catch (err) {
-		console.error('[contributions] Could not queue the auto-accept sweep:', (err as Error).message)
-		attention.push(`auto-accept sweep: ${(err as Error).message}`)
 	}
 
 	// Done

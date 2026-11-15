@@ -8,7 +8,7 @@ import { RecordUnreadableError } from '../contributions/handler.js'
 import { PdsResolutionError } from '../atproto/pds-resolver.js'
 import type { IGDBClient } from '../igdb/client.js'
 import type { AtprotoClient } from '../atproto/client.js'
-import { breakerTrips, classifyFailure, errorShape, isPermanentFailure, needsAttention, syncEntityType } from './sync-entities.js'
+import { IGDB_IDS_PAGE_SIZE, breakerTrips, classifyFailure, errorShape, igdbIdWhereClauses, isPermanentFailure, needsAttention, syncEntityType } from './sync-entities.js'
 
 const PREVIOUS_CURSOR = 1_781_308_800 // 2026-06-13
 
@@ -522,5 +522,124 @@ describe('isPermanentFailure', () => {
 
 	test('other errors are not permanent', () => {
 		expect(isPermanentFailure(new Error('fetch failed'))).toBe(false)
+	})
+})
+
+describe('syncEntityType with igdbIds', () => {
+	let dbPath: string
+	let state: StateManager
+
+	beforeEach(() => {
+		dbPath = join(tmpdir(), `sync-test-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`)
+		state = new StateManager(dbPath)
+		vi.spyOn(console, 'log').mockImplementation(() => {})
+		vi.spyOn(console, 'warn').mockImplementation(() => {})
+		vi.spyOn(console, 'error').mockImplementation(() => {})
+	})
+
+	afterEach(() => {
+		vi.restoreAllMocks()
+		state.close()
+		for (const suffix of ['', '-wal', '-shm']) {
+			const file = dbPath + suffix
+			if (existsSync(file)) unlinkSync(file)
+		}
+	})
+
+	/** An IGDB fake that records each paginate call and returns the ids its where clause names. */
+	function recordingIgdb() {
+		const calls: Array<{ startOffset: number; where: string }> = []
+		const igdb = {
+			async *paginate(_endpoint: string, _fields: string, startOffset: number, where: string) {
+				calls.push({ startOffset, where })
+				const ids = /^where id = \(([\d,]+)\);$/.exec(where)?.[1]?.split(',').map(Number) ?? [1, 2, 3]
+				yield { items: ids.map((id) => ({ id })), offset: startOffset }
+			},
+		} as unknown as IGDBClient
+		return { igdb, calls }
+	}
+
+	function run(igdb: IGDBClient, client: ContributionClient, extra: Partial<Parameters<typeof syncEntityType>[0]> = {}) {
+		return syncEntityType<{ id: number }>({
+			entityType: 'game',
+			igdbEndpoint: 'games',
+			igdbFields: 'fields name;',
+			collection: 'games.gamesgamesgamesgames.game',
+			contributionClient: client,
+			mapRecord: async (item) => ({ name: `Game ${item.id}`, applicationType: 'game' }),
+			...extra,
+		} as Parameters<typeof syncEntityType<{ id: number }>>[0], igdb, {} as AtprotoClient, state)
+	}
+
+	const ok = () => contributionClient(async () => ({ uri: 'at://x/c/1' }))
+
+	test('one where clause per page of 500 ids', () => {
+		expect(IGDB_IDS_PAGE_SIZE).toBe(500)
+		const ids = Array.from({ length: 1001 }, (_, i) => i + 1)
+		const clauses = igdbIdWhereClauses(ids)
+		expect(clauses).toHaveLength(3)
+		expect(clauses[0]).toBe(`where id = (${ids.slice(0, 500).join(',')});`)
+		expect(clauses[1]).toBe(`where id = (${ids.slice(500, 1000).join(',')});`)
+		expect(clauses[2]).toBe('where id = (1001);')
+		expect(igdbIdWhereClauses(ids.slice(0, 500))).toHaveLength(1)
+		expect(igdbIdWhereClauses(ids.slice(0, 501))).toHaveLength(2)
+		expect(igdbIdWhereClauses([])).toEqual([])
+	})
+
+	test('pages through every id, from offset 0, instead of updated_at', async () => {
+		state.setLastSyncAt('game', PREVIOUS_CURSOR)
+		const { igdb, calls } = recordingIgdb()
+		const ids = Array.from({ length: 1200 }, (_, i) => 10_000 + i)
+		const client = ok()
+		const r = await run(igdb, client, { igdbIds: ids, startOffset: 42 })
+		expect(calls.map((c) => c.where)).toEqual(igdbIdWhereClauses(ids))
+		expect(calls.every((c) => c.startOffset === 0)).toBe(true)
+		expect(calls.some((c) => c.where.includes('updated_at'))).toBe(false)
+		expect(client.createContribution).toHaveBeenCalledTimes(1200)
+		expect(r.created).toBe(1200)
+	})
+
+	test('never writes the cursor, with or without one, even on a clean run', async () => {
+		const { igdb } = recordingIgdb()
+		const r1 = await run(igdb, ok(), { igdbIds: [1, 2] })
+		expect(r1.cursorAdvanced).toBe(false)
+		expect(state.getLastSyncAt('game')).toBeNull()
+
+		state.setLastSyncAt('game', PREVIOUS_CURSOR)
+		const r2 = await run(igdb, ok(), { igdbIds: [1, 2] })
+		expect(r2.cursorAdvanced).toBe(false)
+		expect(state.getLastSyncAt('game')).toBe(PREVIOUS_CURSOR)
+	})
+
+	test('leaves streaks and the breaker count alone, and ignores a stale cursor', async () => {
+		state.setLastSyncAt('game', PREVIOUS_CURSOR) // months old: the nightly run would alert
+		state.setMeta('breaker_trips_game', '2')
+		const { igdb } = recordingIgdb()
+		const lua500 = contributionClient(async () => { throw new ContributionRequestError('createContribution', 500, 'script error') })
+		const r = await run(igdb, lua500, { igdbIds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] })
+		expect(r.cursorAlert).toBe(false)
+		expect(r.retryable).toBe(10)
+		expect(r.systemic).toBe(1) // the breaker still reports it
+		expect(state.getMetaNumber('breaker_trips_game')).toBe(2)
+		expect(state.getFailureStreak('game', '1')).toBe(0)
+		expect(state.getLastSyncAt('game')).toBe(PREVIOUS_CURSOR)
+	})
+
+	test('maps games already in state, which a full scan would skip', async () => {
+		state.setEntity('game', '1', 'at://did:web:x/games.gamesgamesgamesgames.game/g1')
+		const { igdb } = recordingIgdb()
+		const mapRecord = vi.fn(async (item: { id: number }) => ({ name: `Game ${item.id}`, applicationType: 'game' }))
+		await run(igdb, ok(), { igdbIds: [1], mapRecord })
+		expect(mapRecord).toHaveBeenCalledTimes(1)
+	})
+
+	test('without igdbIds the run is unchanged: updated_at, startOffset, cursor', async () => {
+		state.setLastSyncAt('game', PREVIOUS_CURSOR)
+		vi.spyOn(Date, 'now').mockReturnValue((PREVIOUS_CURSOR + 86400) * 1000)
+		const { igdb, calls } = recordingIgdb()
+		const r = await run(igdb, ok(), { startOffset: 0 })
+		expect(calls).toEqual([{ startOffset: 0, where: `where updated_at > ${PREVIOUS_CURSOR};` }])
+		expect(r.cursorAdvanced).toBe(true)
+		expect(state.getLastSyncAt('game')).toBe(PREVIOUS_CURSOR + 86400)
 	})
 })
