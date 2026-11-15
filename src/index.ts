@@ -1,8 +1,12 @@
 /**
  * IGDB → atproto scraper
  *
- * Fetches game data from IGDB and creates atproto records
- * in the @gamesgamesgamesgames.games repo.
+ * Full IGDB scrape for the non-game catalogue records: platform families,
+ * platforms, engines, collections and franchises, plus org credits for games
+ * already in state. Writes to the @gamesgamesgamesgames.games repo.
+ *
+ * It never creates or updates game records. Games arrive through the nightly
+ * sync (src/sync.ts) as contributions, which auto-accept applies.
  *
  * Supports resume — if interrupted, re-run to pick up where it left off.
  *
