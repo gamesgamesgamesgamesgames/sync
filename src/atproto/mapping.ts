@@ -20,7 +20,8 @@ import {
 	IGDB_REGION_MAP,
 	IGDB_DATE_FORMAT_MAP,
 	IGDB_AGE_RATING_ORG_MAP,
-	IGDB_AGE_RATING_MAP,
+	IGDB_AGE_RATING_CATEGORY_MAP,
+	IGDB_LEGACY_AGE_RATING_MAP,
 } from '../igdb/types.js'
 
 import type {
@@ -508,16 +509,20 @@ export async function mapGame(
 		record.ageRatings = igdb.age_ratings.map((ar) => {
 			const entry: Record<string, unknown> = {}
 
-			// Organization
+			// The category names its organisation, so it decides both. The
+			// deprecated rating enum is numbered differently and only used
+			// when there is no category.
 			const orgId = typeof ar.organization === 'object' ? ar.organization?.id : ar.organization
-			if (orgId != null) {
-				entry.organization = IGDB_AGE_RATING_ORG_MAP[orgId] ?? String(orgId)
-			}
-
-			// Rating
-			const ratingId = ar.rating_category ?? ar.rating
-			if (ratingId != null) {
-				entry.rating = IGDB_AGE_RATING_MAP[ratingId] ?? String(ratingId)
+			const mapped = ar.rating_category != null
+				? IGDB_AGE_RATING_CATEGORY_MAP[ar.rating_category]
+				: ar.rating != null ? IGDB_LEGACY_AGE_RATING_MAP[ar.rating] : undefined
+			if (mapped) {
+				entry.organization = mapped.organization
+				entry.rating = mapped.rating
+			} else {
+				if (orgId != null) entry.organization = IGDB_AGE_RATING_ORG_MAP[orgId] ?? String(orgId)
+				const ratingId = ar.rating_category ?? ar.rating
+				if (ratingId != null) entry.rating = String(ratingId)
 			}
 
 			// Content descriptors
