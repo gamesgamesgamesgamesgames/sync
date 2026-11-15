@@ -298,6 +298,23 @@ describe('syncEntityType cursor', () => {
 		expect(client.createContribution).not.toHaveBeenCalled()
 	})
 
+	test('the pipeline passes isImageMirrored through to correction rkeys', async () => {
+		const media = [{ blob: { $type: 'blob', ref: { $link: 'bafyM' }, mimeType: 'image/jpeg', size: 1 }, mediaType: 'cover', igdbImageId: 'coM' }]
+		const rkeys: string[] = []
+		const client = {
+			getGameByIgdbId: vi.fn(async (id: string) => ({ uri: `at://did:web:g/games.gamesgamesgamesgames.game/${id}`, record: {} })),
+			getGameRecord: vi.fn(async (uri: string) => ({ uri, cid: 'bafyBase', value: {} })),
+			getRecord: vi.fn(async () => null),
+			canReadRepo: vi.fn(() => true),
+			createContribution: vi.fn(async (p: { rkey: string }) => { rkeys.push(p.rkey); return { uri: 'at://x/c/1' } }),
+		} as unknown as ContributionClient
+		const mapRecord = async () => ({ name: 'x', media })
+		day(1); await run(client, [1], { mapRecord, isImageMirrored: () => false })
+		day(2); await run(client, [1], { mapRecord, isImageMirrored: () => true })
+		expect(rkeys).toHaveLength(2)
+		expect(rkeys[0]).not.toBe(rkeys[1])
+	})
+
 	test('a run that does not trip resets the trip count', async () => {
 		const cluster = skippingClient((id) => (id <= 6 ? clusterError(id) : null), (id) => id > 6)
 		day(1); await run(cluster, range(50))
