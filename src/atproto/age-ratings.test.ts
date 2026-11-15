@@ -1,6 +1,8 @@
 import { describe, test, expect } from 'vitest'
 import { mapGame } from './mapping.js'
 import { IGDB_AGE_RATING_CATEGORY_MAP, IGDB_LEGACY_AGE_RATING_MAP } from '../igdb/types.js'
+import { transformers } from '../transformers/index.js'
+import type { TransformerContext } from '../transformers/types.js'
 import type { IGDBClient } from '../igdb/client.js'
 import type { StateManager } from '../state.js'
 
@@ -138,4 +140,15 @@ describe('mapGame age ratings', () => {
 		const [r] = await ratingsOf([{ id: 1, rating_category: 6, rating_content_descriptions: [{ id: 1, description: 'Blood' }] }])
 		expect(r).toEqual({ organization: 'esrb', rating: 'M', contentDescriptors: ['Blood'] })
 	})
+})
+
+// The old GRAC Eighteen→Nineteen migrations (the fix-grac-rating transformer
+// and backfill-grac-nineteen.ts) are gone: a fresh state DB would run them
+// again and undo category 40.
+test('no transformer rewrites a GRAC rating', async () => {
+	for (const t of transformers) {
+		const record = { ageRatings: [{ organization: 'grac', rating: 'Eighteen' }, { organization: 'grac', rating: 'Nineteen' }] }
+		await t.transform(record, {}, {} as TransformerContext)
+		expect(record.ageRatings, t.name).toEqual([{ organization: 'grac', rating: 'Eighteen' }, { organization: 'grac', rating: 'Nineteen' }])
+	}
 })

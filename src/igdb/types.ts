@@ -462,8 +462,8 @@ export interface MappedAgeRating { organization: string; rating: string }
 
 // Rating labels follow lexicon search.lua's age filters: PEGI as words
 // ("Twelve"), USK and ClassInd as plain numbers ("12"), the rest as the
-// organisation prints them. GRAC 19+ stays "Nineteen" (see
-// backfill-grac-nineteen.ts); IGDB's newer GRAC 18+ is "Eighteen".
+// organisation prints them. GRAC 19+ stays "Nineteen", the label
+// stored records already use; IGDB's newer GRAC 18+ is "Eighteen".
 const ESRB = 'esrb', PEGI = 'pegi', CERO = 'cero', USK = 'usk', GRAC = 'grac', CLASS_IND = 'classInd', ACB = 'acb'
 
 /**
