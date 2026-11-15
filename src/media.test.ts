@@ -178,6 +178,107 @@ describe('the game media path (buildMediaItemsConcurrent, which mapGame uses)', 
 	})
 })
 
+describe('cached blobs missing from the contributor repo', () => {
+	function fullLedger(opts: { mirrored?: string[]; contributor?: string[] } = {}) {
+		const mirrored = new Set(opts.mirrored ?? [])
+		const contributor = new Set(opts.contributor ?? [])
+		return {
+			mirrored, contributor,
+			isBlobMirrored: (id: string) => mirrored.has(id),
+			setBlobMirrored: (id: string) => { mirrored.add(id) },
+			isBlobInContributor: (id: string) => contributor.has(id),
+			setBlobInContributor: (id: string) => { contributor.add(id) },
+		}
+	}
+	function cacheState(cachedIds: string[]): StateManager {
+		const cache = new Map(cachedIds.map((id) => [id, blob(`bafy-${id}`)]))
+		return {
+			hasBlob: (id: string) => cache.has(id),
+			getBlob: (id: string) => cache.get(id),
+			setBlob: vi.fn(),
+			getEntity: () => undefined,
+		} as unknown as StateManager
+	}
+
+	test('mapGame re-uploads a cached cover the contributor repo lacks, with its cached CID, and records it', async () => {
+		const igdb = { downloadImage: vi.fn(async () => Buffer.from([1])) } as unknown as IGDBClient
+		const primary: BlobUploader = { uploadBlob: vi.fn(async () => blob('bafy-co7')) }
+		const mirror: MirrorTarget = { uploadBlobOnce: vi.fn(async () => blob('bafy-co7')) }
+		const l = fullLedger({ mirrored: ['co7'] })
+		const record = await mapGame(
+			{ id: 7, name: 'Old Cover', cover: { id: 1, image_id: 'co7', width: 600, height: 800 } } as never,
+			igdb, {} as AtprotoClient, cacheState(['co7']), { blobUploader: new MirroringBlobUploader(primary, mirror, l) },
+		)
+		expect((record.media as Array<{ blob: { ref: { $link: string } } }>)[0]?.blob.ref.$link).toBe('bafy-co7')
+		expect(primary.uploadBlob).toHaveBeenCalledTimes(1)
+		expect(primary.uploadBlob).toHaveBeenCalledWith(expect.anything(), 'image/jpeg', { imageId: 'co7' })
+		expect(mirror.uploadBlobOnce).not.toHaveBeenCalled()
+		expect(l.contributor.has('co7')).toBe(true)
+	})
+
+	test('a cached blob in both repos is not downloaded or uploaded', async () => {
+		const igdb = { downloadImage: vi.fn() } as unknown as IGDBClient
+		const primary: BlobUploader = { uploadBlob: vi.fn() }
+		const mirror: MirrorTarget = { uploadBlobOnce: vi.fn() }
+		await buildMediaItemsConcurrent([{ imageId: 'sc1', mediaType: 'screenshot' }], igdb,
+			new MirroringBlobUploader(primary, mirror, fullLedger({ mirrored: ['sc1'], contributor: ['sc1'] })), cacheState(['sc1']))
+		expect(igdb.downloadImage).not.toHaveBeenCalled()
+		expect(primary.uploadBlob).not.toHaveBeenCalled()
+		expect(mirror.uploadBlobOnce).not.toHaveBeenCalled()
+	})
+
+	test('a cached blob missing from both repos goes to both', async () => {
+		const igdb = { downloadImage: vi.fn(async () => Buffer.from([1])) } as unknown as IGDBClient
+		const primary: BlobUploader = { uploadBlob: vi.fn(async () => blob('bafy-sc1')) }
+		const mirror: MirrorTarget = { uploadBlobOnce: vi.fn(async () => blob('bafy-sc1')) }
+		const l = fullLedger()
+		await buildMediaItemsConcurrent([{ imageId: 'sc1', mediaType: 'screenshot' }], igdb, new MirroringBlobUploader(primary, mirror, l), cacheState(['sc1']))
+		expect(igdb.downloadImage).toHaveBeenCalledTimes(1)
+		expect(l.contributor.has('sc1')).toBe(true)
+		expect(l.mirrored.has('sc1')).toBe(true)
+	})
+
+	test('a contributor re-upload with a different CID is not recorded', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {})
+		const igdb = { downloadImage: vi.fn(async () => Buffer.from([1])) } as unknown as IGDBClient
+		const primary: BlobUploader = { uploadBlob: vi.fn(async () => blob('bafy-other')) }
+		const l = fullLedger({ mirrored: ['sc1'] })
+		await buildMediaItemsConcurrent([{ imageId: 'sc1', mediaType: 'screenshot' }], igdb,
+			new MirroringBlobUploader(primary, { uploadBlobOnce: vi.fn() }, l), cacheState(['sc1']))
+		expect(l.contributor.has('sc1')).toBe(false)
+	})
+
+	test('a failed contributor re-upload is logged, not thrown', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {})
+		const igdb = { downloadImage: vi.fn(async () => Buffer.from([1])) } as unknown as IGDBClient
+		const primary: BlobUploader = { uploadBlob: vi.fn(async () => { throw new Error('uploadBlob returned 500') }) }
+		const items = await buildMediaItemsConcurrent([{ imageId: 'sc1', mediaType: 'screenshot' }], igdb,
+			new MirroringBlobUploader(primary, { uploadBlobOnce: vi.fn() }, fullLedger({ mirrored: ['sc1'] })), cacheState(['sc1']))
+		expect(items[0]?.blob.ref.$link).toBe('bafy-sc1')
+	})
+
+	test('a fresh upload records the contributor copy', async () => {
+		const primary: BlobUploader = { uploadBlob: vi.fn(async () => blob('bafy-new')) }
+		const l = fullLedger()
+		await new MirroringBlobUploader(primary, { uploadBlobOnce: vi.fn(async () => blob('bafy-new')) }, l).uploadBlob(new Uint8Array([1]), 'image/jpeg', { imageId: 'co9' })
+		expect(l.contributor.has('co9')).toBe(true)
+	})
+})
+
+describe('StateManager blob_contributor', () => {
+	test('round-trips', async () => {
+		const { StateManager } = await import('./state.js')
+		const { tmpdir } = await import('node:os')
+		const { join } = await import('node:path')
+		vi.spyOn(console, 'log').mockImplementation(() => {})
+		const s = new StateManager(join(tmpdir(), `bc-${Date.now()}-${Math.random().toString(36).slice(2)}.sqlite`))
+		expect(s.isBlobInContributor('co1')).toBe(false)
+		s.setBlobInContributor('co1')
+		expect(s.isBlobInContributor('co1')).toBe(true)
+		s.close()
+	})
+})
+
 describe('assertCatalogueAccount', () => {
 	test('passes when the DIDs match', () => {
 		expect(() => assertCatalogueAccount('did:web:g', 'did:web:g')).not.toThrow()

@@ -30,10 +30,14 @@ export interface MirrorTarget {
 	uploadBlobOnce(data: Uint8Array, mimeType: string): Promise<UploadedBlob>
 }
 
-/** Where the mirror records which cached blobs it has copied. */
+/** Where the mirror records which cached blobs are in which repo. */
 export interface MirrorLedger {
+	/** In the catalogue repo. */
 	isBlobMirrored(imageId: string): boolean
 	setBlobMirrored(imageId: string): void
+	/** In the contributor's repo. Optional so older ledgers still work. */
+	isBlobInContributor?(imageId: string): boolean
+	setBlobInContributor?(imageId: string): void
 }
 
 /**
@@ -69,16 +73,45 @@ export class MirroringBlobUploader implements BlobUploader {
 
 	async uploadBlob(data: Uint8Array, mimeType: string, options?: UploadOptions): Promise<UploadedBlob> {
 		const result = await this.primary.uploadBlob(data, mimeType, options)
+		if (options?.imageId) this.ledger?.setBlobInContributor?.(options.imageId)
 		await this.copy(data, mimeType, result.ref.$link, options?.imageId)
 		return result
 	}
 
-	needsMirror(imageId: string): boolean {
-		return !!this.ledger && !this.ledger.isBlobMirrored(imageId)
+	private inContributor(imageId: string): boolean {
+		// Without a contributor ledger, assume it is there (the old behaviour).
+		return !this.ledger?.isBlobInContributor || this.ledger.isBlobInContributor(imageId)
 	}
 
+	needsMirror(imageId: string): boolean {
+		if (!this.ledger) return false
+		return !this.ledger.isBlobMirrored(imageId) || !this.inContributor(imageId)
+	}
+
+	/**
+	 * A cached blob may be missing from either repo: before 2026-06-18 the
+	 * sync uploaded to the catalogue repo only, and from then until mirroring
+	 * existed, to the contributor's only. A contribution referencing a blob its
+	 * own repo doesn't hold is refused (BlobNotFound), so the contributor copy
+	 * is made with the normal retrying upload; the catalogue copy stays a
+	 * one-shot best effort.
+	 */
 	async mirrorCached(imageId: string, data: Uint8Array, mimeType: string, expectedCid: string): Promise<void> {
-		await this.copy(data, mimeType, expectedCid, imageId)
+		if (!this.inContributor(imageId)) {
+			try {
+				const uploaded = await this.primary.uploadBlob(data, mimeType, { imageId })
+				if (uploaded.ref.$link === expectedCid) {
+					this.ledger?.setBlobInContributor?.(imageId)
+				} else {
+					console.warn(`[media] Re-uploaded blob CID ${uploaded.ref.$link} differs from cached ${expectedCid}`)
+				}
+			} catch (err) {
+				console.warn(`[media] Failed to upload cached blob ${expectedCid} to the contributor repo:`, (err as Error).message)
+			}
+		}
+		if (this.ledger && !this.ledger.isBlobMirrored(imageId)) {
+			await this.copy(data, mimeType, expectedCid, imageId)
+		}
 	}
 
 	/** One attempt, so a rate-limited catalogue PDS never stalls the sync. */
@@ -97,10 +130,9 @@ export class MirroringBlobUploader implements BlobUploader {
 }
 
 /**
- * For a cache hit: when the uploader still needs this blob in another repo,
- * download it again and mirror it. Never throws; the cached ref stands either
- * way. A blob cached while uploads went only to the contributor's repo may
- * still be missing from the catalogue repo.
+ * For a cache hit: when the uploader still needs this blob in one of the
+ * repos (the contributor's or the catalogue's), download it again and copy it
+ * there. Never throws; the cached ref stands either way.
  */
 async function mirrorCacheHit(
 	uploader: BlobUploader,
@@ -116,7 +148,7 @@ async function mirrorCacheHit(
 	try {
 		bytes = await runDownload(() => igdb.downloadImage(imageId, size))
 	} catch (err) {
-		console.warn(`[igdb] Failed to download image ${imageId} for mirroring:`, (err as Error).message)
+		console.warn(`[igdb] Failed to download image ${imageId} to copy its cached blob:`, (err as Error).message)
 		return
 	}
 	await runUpload(() => uploader.mirrorCached!(imageId, bytes, cached.mimeType, cached.ref.$link))
