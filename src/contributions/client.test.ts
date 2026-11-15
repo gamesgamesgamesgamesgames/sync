@@ -126,6 +126,24 @@ describe('ContributionClient.getGameRecord', () => {
 		expect(err.status).toBe(0)
 	})
 
+	test('hasBlob refuses a repo that is not allowlisted, before any request', async () => {
+		const fetchImpl = vi.fn(async () => json(200, {}))
+		const err = await client(fetchImpl as unknown as typeof fetch, []).hasBlob('did:web:evil.test', 'bafy').catch((e) => e)
+		expect(err).toBeInstanceOf(RecordReadNotAllowedError)
+		expect(fetchImpl).not.toHaveBeenCalled()
+	})
+
+	test('hasBlob asks the catalogue PDS for an allowlisted catalogue DID', async () => {
+		const fetchImpl = routed((url) => {
+			expect(url.pathname).toBe('/xrpc/com.atproto.sync.getBlob')
+			expect(url.searchParams.get('did')).toBe('did:web:x.test')
+			return url.searchParams.get('cid') === 'bafyHere' ? new Response('img', { status: 200 }) : json(400, { error: 'BlobNotFound' })
+		})
+		const c = client(fetchImpl as unknown as typeof fetch)
+		expect(await c.hasBlob('did:web:x.test', 'bafyHere')).toBe(true)
+		expect(await c.hasBlob('did:web:x.test', 'bafyGone')).toBe(false)
+	})
+
 	test('the own-contribution dedupe reads from the sync account\'s PDS too', async () => {
 		const fetchImpl = vi.fn(async (input: string) => {
 			const url = new URL(input)

@@ -1,11 +1,12 @@
-import type { ContributionClient } from './client.js'
 import { diffGameRecord, pickContributableFields } from './diff.js'
 import { contentHashRkey } from './hash.js'
+import { ContributionRequestError, type ContributionClient } from './client.js'
 
 /**
- * getGame found a game but its stored record could not be read. That is
- * never the game's fault: it means the read path is broken, so it counts as
- * systemic and is never charged to the game.
+ * getGame found a game but its stored record could not be read: the PDS says
+ * the record isn't there. That is the game's problem (index drift, a
+ * deactivated repo), so it is charged to the game; a whole-path outage still
+ * trips the breaker.
  */
 export class RecordUnreadableError extends Error {
 	constructor(readonly uri: string, readonly igdbId: string) {
@@ -22,6 +23,93 @@ export interface ContributionSyncResult {
 	uri?: string
 }
 
+export interface SyncGameOptions {
+	/**
+	 * Called with the IGDB image ids of a contribution's media when the
+	 * contributor's PDS refused it for a missing blob, so the ledger stops
+	 * claiming those blobs are there and a later run copies them again.
+	 */
+	onMissingContributorBlobs?: (imageIds: string[]) => void
+	/**
+	 * Whether this image's blob, at this CID, is recorded as mirrored to the
+	 * catalogue repo. The ledger is only written when the catalogue's upload
+	 * returned that exact CID, which is trusted as is: the catalogue runs the
+	 * reference PDS, whose sync.getBlob answers BlobNotFound for blobs no record
+	 * references yet, so it can't confirm a fresh mirror.
+	 */
+	isImageMirrored?: (imageId: string, cid: string) => boolean
+}
+
+interface MediaRef { imageId: string; cid: string }
+
+function mediaRefs(changes: Record<string, unknown>): MediaRef[] {
+	if (!Array.isArray(changes.media)) return []
+	const refs: MediaRef[] = []
+	for (const item of changes.media as Array<Record<string, unknown>>) {
+		const imageId = typeof item?.igdbImageId === 'string' ? item.igdbImageId : undefined
+		const cid = (item?.blob as { ref?: { $link?: unknown } } | undefined)?.ref?.$link
+		if (imageId && typeof cid === 'string') refs.push({ imageId, cid })
+	}
+	return refs
+}
+
+/**
+ * The CIDs of the media in `changes` whose blobs are recorded as mirrored to
+ * the catalogue repo at that very CID, sorted and unique. Part of a
+ * correction's rkey: a media change that auto-accept gave up on (its blobs
+ * were missing) comes back with the same base and the same changes, and would
+ * otherwise reuse the old rkey and be skipped forever. Once mirroring lands
+ * its blobs, this list changes and the contribution gets a fresh rkey.
+ */
+export function mirroredMediaCids(changes: Record<string, unknown>, isImageMirrored?: (imageId: string, cid: string) => boolean): string[] {
+	if (!isImageMirrored) return []
+	const cids = mediaRefs(changes).filter((r) => isImageMirrored(r.imageId, r.cid)).map((r) => r.cid)
+	return [...new Set(cids)].sort()
+}
+
+const BLOB_NOT_FOUND = /BlobNotFound|Could not find blob/
+
+function isBlobNotFound(err: unknown): boolean {
+	return err instanceof ContributionRequestError && BLOB_NOT_FOUND.test(err.message)
+}
+
+/**
+ * Create a contribution unless one with the same content already exists. If
+ * the contributor's PDS refuses it because a media blob is missing (the ledger
+ * was wrong), forget those blobs and retry once without `media`, so the other
+ * fields still land and the media follows on a later run.
+ */
+async function submit(
+	contributionClient: ContributionClient,
+	params: { contributionType: 'correction' | 'newGame'; changes: Record<string, unknown>; subject?: string; baseCid?: string },
+	options: SyncGameOptions,
+): Promise<ContributionSyncResult> {
+	const { contributionType, changes, subject, baseCid } = params
+	const rkey = contributionType === 'newGame'
+		? contentHashRkey(changes)
+		: contentHashRkey(changes, baseCid, mirroredMediaCids(changes, options.isImageMirrored))
+	const existingRecord = await contributionClient.getRecord(CONTRIBUTION_COLLECTION, rkey)
+	if (existingRecord) {
+		return { action: 'skipped' }
+	}
+
+	try {
+		const result = await contributionClient.createContribution({ contributionType, changes, rkey, ...(subject ? { subject } : {}) })
+		return { action: 'created', contributionType, uri: result.uri }
+	} catch (err) {
+		// The retry has no media, so it can't come back here: at most one retry.
+		if (!isBlobNotFound(err) || changes.media === undefined) throw err
+		const imageIds = mediaRefs(changes).map((r) => r.imageId)
+		options.onMissingContributorBlobs?.(imageIds)
+		console.warn(`  [contributions] Contributor repo is missing media blobs (${imageIds.length} images); retrying without media`)
+		const { media: _media, ...rest } = changes
+		if (Object.keys(rest).length === 0) {
+			return { action: 'skipped' }
+		}
+		return submit(contributionClient, { ...params, changes: rest }, options)
+	}
+}
+
 /**
  * Sync a single IGDB game via the contribution path.
  *
@@ -34,23 +122,13 @@ export async function syncGameViaContribution(
 	igdbId: string,
 	mappedRecord: Record<string, unknown>,
 	contributionClient: ContributionClient,
+	options: SyncGameOptions = {},
 ): Promise<ContributionSyncResult> {
 	const existing = await contributionClient.getGameByIgdbId(igdbId)
 
 	if (!existing) {
 		const changes = pickContributableFields(mappedRecord)
-		const rkey = contentHashRkey(changes)
-		const existingRecord = await contributionClient.getRecord(CONTRIBUTION_COLLECTION, rkey)
-		if (existingRecord) {
-			return { action: 'skipped' }
-		}
-
-		const result = await contributionClient.createContribution({
-			contributionType: 'newGame',
-			changes,
-			rkey,
-		})
-		return { action: 'created', contributionType: 'newGame', uri: result.uri }
+		return submit(contributionClient, { contributionType: 'newGame', changes }, options)
 	}
 
 	// Raw reads only go to repos we trust (the catalogue and our own). A game
@@ -72,26 +150,14 @@ export async function syncGameViaContribution(
 		return { action: 'skipped' }
 	}
 
-	// The rkey covers the base record too: the same diff against a changed
-	// base (media given up at the deferral cap, IGDB restoring a reverted
-	// field) is a new contribution, not a duplicate of the old one.
-	const rkey = contentHashRkey(changes, stored.cid)
-	const existingRecord = await contributionClient.getRecord(CONTRIBUTION_COLLECTION, rkey)
-	if (existingRecord) {
-		return { action: 'skipped' }
+	// The rkey covers the base record and the mirror state of the media: the
+	// same diff against a changed base, or with its blobs newly in the
+	// catalogue, is a new contribution, not a duplicate of the old one.
+	const result = await submit(contributionClient, { contributionType: 'correction', changes, subject: existing.uri, baseCid: stored.cid }, options)
+
+	if (existing.redirectedFrom && result.action === 'created') {
+		console.log(`  [contributions] Game ${igdbId} was migrated from ${existing.redirectedFrom} → ${existing.uri}`)
 	}
 
-	const subjectUri = existing.uri
-	const result = await contributionClient.createContribution({
-		contributionType: 'correction',
-		changes,
-		subject: subjectUri,
-		rkey,
-	})
-
-	if (existing.redirectedFrom) {
-		console.log(`  [contributions] Game ${igdbId} was migrated from ${existing.redirectedFrom} → ${subjectUri}`)
-	}
-
-	return { action: 'created', contributionType: 'correction', uri: result.uri }
+	return result
 }

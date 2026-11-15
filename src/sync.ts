@@ -100,7 +100,7 @@ async function main() {
 	// Game media goes to the contributor's repo (for the contribution record)
 	// and to the catalogue repo (for when auto-accept applies it).
 	assertCatalogueAccount(atproto.getDid(), process.env.PENTARACT_DID)
-	const blobUploader = new MirroringBlobUploader(contributionClient, atproto, state)
+	const blobUploader = new MirroringBlobUploader(contributionClient, atproto, state, contributionClient)
 
 	const shutdown = () => {
 		console.log('\n[shutdown] Closing state...')
@@ -162,6 +162,8 @@ async function main() {
 	const gameConfig: SyncEntityConfig<IGDBGame> = {
 		entityType: 'game',
 		contributionClient,
+		onMissingContributorBlobs: (imageIds) => imageIds.forEach((id) => state.clearBlobInContributor(id)),
+		isImageMirrored: (imageId, cid) => state.isBlobMirrored(imageId, cid),
 		igdbEndpoint: 'games',
 		igdbFields: [
 			'fields name, summary, storyline, slug, category, game_type.type,',
